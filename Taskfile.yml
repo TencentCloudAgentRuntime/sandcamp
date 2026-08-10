@@ -1,0 +1,60 @@
+version: "3"
+
+vars:
+  RUST_TARGET: '{{default "x86_64-unknown-linux-musl" .RUST_TARGET}}'
+
+tasks:
+  test:
+    desc: 运行跨平台单元测试
+    cmds:
+      - go test ./...
+      - cargo test --workspace
+
+  build:
+    desc: 构建静态 Linux/amd64 启动二进制
+    env:
+      RUSTFLAGS: -C linker=rust-lld
+    cmds:
+      - mkdir -p out
+      - cargo build --workspace --release --target {{.RUST_TARGET}}
+      - install -m 0755 target/{{.RUST_TARGET}}/release/campd out/campd
+      - install -m 0755 target/{{.RUST_TARGET}}/release/sandrun out/sandrun
+
+  fmt:
+    desc: 格式化 Go 和 Rust 源码
+    cmds:
+      - go fmt ./...
+      - cargo fmt --all
+
+  lint:
+    desc: 检查源码格式和 Rust 警告
+    cmds:
+      - test -z "$(gofmt -l $(rg --files -g '*.go'))"
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo clippy --workspace --all-targets --target {{.RUST_TARGET}} -- -D warnings
+
+  images:build:
+    desc: 构建本地 Linux/amd64 Image Volume 测试镜像
+    deps: [build]
+    cmds:
+      - docker build --platform linux/amd64 -t sandcamp-fastapi-proxy:local test/image-volume/fastapi-proxy
+      - docker build --platform linux/amd64 -t sandcamp-egress:local test/image-volume/egress
+      - docker build --platform linux/amd64 -t sandcamp-runtime:local -f images/runtime/Dockerfile .
+      - docker build --platform linux/amd64 --target root -t sandcamp-validation-main:root-local validation/fixtures/main
+      - docker build --platform linux/amd64 --target nonroot -t sandcamp-validation-main:nonroot-local validation/fixtures/main
+
+  test:sandrun-linux:
+    desc: 在 Docker 中验证只读 Image Volume 根文件系统
+    deps: [images:build]
+    env:
+      SANDRUN_BIN: '{{.ROOT_DIR}}/out/sandrun'
+    cmds:
+      - bash ./scripts/test-sandrun-linux.sh
+
+  test:stack-linux:
+    desc: 联合验证 root/nonroot campd、sandrun、FastAPI 和 Egress
+    deps: [images:build]
+    cmds:
+      - SCENARIO=root bash ./scripts/test-stack-linux.sh
+      - SCENARIO=nonroot bash ./scripts/test-stack-linux.sh

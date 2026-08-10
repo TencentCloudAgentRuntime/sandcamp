@@ -1,0 +1,8 @@
+/out/
+/target/
+.env*
+!.env.example
+/validation/evidence/
+.DS_Store
+__pycache__/
+*.pyc
