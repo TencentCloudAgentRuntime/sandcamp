@@ -7,9 +7,9 @@ cd "$(dirname "$0")/.."
 ALPINE_IMAGE=${ALPINE_IMAGE:-docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e}
 DEBIAN_IMAGE=${DEBIAN_IMAGE:-docker.io/library/debian@sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143}
 PYTHON_IMAGE=${PYTHON_IMAGE:-docker.io/library/python:3.11-slim-bookworm@sha256:77923445c077d8eb971b14b2b114a1d9cd4a87edb4c75654820ca4832ee8cb15}
-RUNTIME_IMAGE=${RUNTIME_IMAGE:-sandcamp-runtime:poc-20260806}
-FASTAPI_IMAGE=${FASTAPI_IMAGE:-sandcamp-fastapi-proxy:poc-20260806}
-EGRESS_IMAGE=${EGRESS_IMAGE:-sandcamp-egress:poc-20260806}
+RUNTIME_IMAGE=${RUNTIME_IMAGE:-sandcamp-runtime:local}
+FASTAPI_IMAGE=${FASTAPI_IMAGE:-sandcamp-fastapi-proxy:local}
+EGRESS_IMAGE=${EGRESS_IMAGE:-sandcamp-egress:local}
 
 SANDRUN_BIN=$(realpath "$SANDRUN_BIN")
 test -x "$SANDRUN_BIN"

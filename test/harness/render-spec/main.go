@@ -20,7 +20,7 @@ func main() {
 		Env: map[string]string{
 			"SANDCAMP_MAIN_PROCESS_ENV": "from-main-process-spec",
 		},
-		StartupProbe: startupProbe("/", 8080, 7*time.Second),
+		Probe: readinessProbe("/", 8080, 7*time.Second),
 	}
 	if os.Getenv("SANDCAMP_TEST_NONROOT") == "1" {
 		mainProcess.Command = []string{
@@ -34,37 +34,23 @@ func main() {
 	configuration, err := testwire.Render(sandcamp.Spec{
 		Sidecars: []sandcamp.Process{
 			{
-				Name: "egress",
-				Command: []string{
-					"/mnt/sandcamp/bin/sandrun",
-					"--rootfs", "/mnt/egress",
-					"--overlay-id", "egress",
-					"--standard-mounts",
-					"--",
-					"/opt/opensandbox-egress/egress",
-				},
+				Name:    "egress",
+				Command: []string{"/opt/opensandbox-egress/egress"},
 				Env: map[string]string{
 					"OPENSANDBOX_EGRESS_MODE":      "dns",
 					"OPENSANDBOX_EGRESS_HTTP_ADDR": ":24774",
 					"OPENSANDBOX_EGRESS_RULES":     `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"*.example.com"}]}`,
 					"PATH":                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 				},
-				StartupProbe: startupProbe("/healthz", 24774, 2*time.Second),
+				Probe: readinessProbe("/healthz", 24774, 2*time.Second),
 			},
 			{
 				Name: "fastapi",
 				Command: []string{
-					"/mnt/sandcamp/bin/sandrun",
-					"--rootfs", "/mnt/fastapi",
-					"--overlay-id", "fastapi",
-					"--workdir", "/opt/fastapi-proxy",
-					"--standard-mounts",
-					"--bind", "/sandcamp-validation/share", "/mnt/share",
-					"--ro-bind", "/sandcamp-validation/config/probe.txt", "/etc/sandcamp-validation/probe.txt",
-					"--",
 					"/usr/local/bin/python",
 					"/opt/fastapi-proxy/app.py",
 				},
+				WorkDir: "/opt/fastapi-proxy",
 				Env: map[string]string{
 					"FASTAPI_PORT":            "9200",
 					"HOME":                    "/root",
@@ -75,11 +61,31 @@ func main() {
 					"UPSTREAM_URL":            "http://127.0.0.1:8080/",
 					"SANDCAMP_SIDECAR_ENV":    "from-process-spec",
 				},
-				Expose:       []int{9200},
-				StartupProbe: startupProbe("/healthz", 9200, 16*time.Second),
+				Expose: []int{9200},
+				Probe:  readinessProbe("/healthz", 9200, 16*time.Second),
 			},
 		},
-		Main: mainProcess,
+		Main: []sandcamp.Process{mainProcess},
+	}, map[string]testwire.SidecarRuntime{
+		"egress": {
+			RootFS:         "/mnt/egress",
+			StandardMounts: true,
+		},
+		"fastapi": {
+			RootFS:         "/mnt/fastapi",
+			StandardMounts: true,
+			Binds: []testwire.Bind{
+				{
+					Source: "/sandcamp-validation/share",
+					Target: "/mnt/share",
+				},
+				{
+					Source:   "/sandcamp-validation/config/probe.txt",
+					Target:   "/etc/sandcamp-validation/probe.txt",
+					ReadOnly: true,
+				},
+			},
+		},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -95,10 +101,10 @@ func main() {
 	os.Exit(1)
 }
 
-func startupProbe(path string, port int, timeout time.Duration) *sandcamp.StartupProbe {
-	return &sandcamp.StartupProbe{
-		Path:         path,
-		Port:         port,
-		ReadyTimeout: timeout,
+func readinessProbe(path string, port int, timeout time.Duration) *sandcamp.ReadinessProbe {
+	return &sandcamp.ReadinessProbe{
+		Path:           path,
+		Port:           port,
+		StartupTimeout: timeout,
 	}
 }

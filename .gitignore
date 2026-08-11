@@ -3,6 +3,7 @@
 .env*
 !.env.example
 /validation/evidence/
+/test/e2e/evidence/
 .DS_Store
 __pycache__/
 *.pyc

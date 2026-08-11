@@ -37,7 +37,7 @@ func TestRenderMountsOwnsImageVolumePaths(t *testing.T) {
 	}
 }
 
-func TestRenderStartHidesSandrunFromProcessDeclarations(t *testing.T) {
+func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 	configuration, err := RenderStart(referenceImages(), referenceSpec())
 	if err != nil {
 		t.Fatal(err)
@@ -51,83 +51,117 @@ func TestRenderStartHidesSandrunFromProcessDeclarations(t *testing.T) {
 	if got := []int64{*configuration.Ports[0].Port, *configuration.Ports[1].Port}; !reflect.DeepEqual(got, []int64{8080, 9200}) {
 		t.Fatalf("ports = %v", got)
 	}
-	decoded := decodeRenderedSpec(t, configuration)
-	if len(decoded.Processes) != 3 {
-		t.Fatalf("processes = %#v", decoded.Processes)
+
+	decoded, raw := decodeRuntimeSpec(t, configuration)
+	if decoded.Version != 2 {
+		t.Fatalf("version = %d", decoded.Version)
 	}
-	egress := decoded.Processes[0]
-	if !reflect.DeepEqual(egress.Argv, []string{
-		defaultSandrunPath,
-		"--rootfs", "/mnt/sandcamp-sidecars/egress",
-		"--overlay-device", overlayDevicePath,
-		"--overlay-id", "egress",
-		"--standard-mounts",
-		"--",
-		"/opt/opensandbox-egress/egress",
-	}) {
-		t.Fatalf("egress argv = %#v", egress.Argv)
+	if strings.Contains(string(raw), "sandrun") {
+		t.Fatalf("SDK must preserve declarations instead of rendering sandrun argv: %s", raw)
 	}
-	fastAPI := decoded.Processes[1]
-	if !reflect.DeepEqual(fastAPI.Argv, []string{
-		defaultSandrunPath,
-		"--rootfs", "/mnt/sandcamp-sidecars/fastapi",
-		"--overlay-device", overlayDevicePath,
-		"--overlay-id", "fastapi",
-		"--standard-mounts",
-		"--workdir", "/opt/fastapi-proxy",
-		"--",
-		"/usr/local/bin/python", "/opt/fastapi-proxy/app.py",
-	}) {
-		t.Fatalf("fastapi argv = %#v", fastAPI.Argv)
+	if len(decoded.Sidecars) != 2 || len(decoded.Main) != 3 {
+		t.Fatalf("runtime declaration = %#v", decoded)
 	}
-	if fastAPI.WorkDir != "" {
-		t.Fatalf("campd must not apply the sidecar workdir before sandrun: %q", fastAPI.WorkDir)
+
+	egress := decoded.Sidecars[0]
+	if egress.Name != "egress" || egress.Kind != Service {
+		t.Fatalf("egress identity = %#v", egress)
 	}
-	main := decoded.Processes[2]
-	if !main.Main || !reflect.DeepEqual(main.Argv, []string{"/app/server"}) || main.WorkDir != "/app" {
-		t.Fatalf("main = %#v", main)
+	if egress.RootFS != "/mnt/sandcamp-sidecars/egress" {
+		t.Fatalf("egress rootfs = %q", egress.RootFS)
+	}
+	if egress.OverlayDevice != defaultOverlayDevicePath || !egress.StandardMounts {
+		t.Fatalf("egress filesystem options = %#v", egress)
+	}
+	if !reflect.DeepEqual(egress.Command, []string{"/opt/opensandbox-egress/egress"}) {
+		t.Fatalf("egress command = %#v", egress.Command)
+	}
+	if egress.ReadinessProbe == nil || egress.ReadinessProbe.StartupTimeoutMS != 3_000 {
+		t.Fatalf("egress readiness probe = %#v", egress.ReadinessProbe)
+	}
+
+	fastAPI := decoded.Sidecars[1]
+	if fastAPI.RootFS != "/mnt/sandcamp-sidecars/fastapi" || fastAPI.WorkDir != "/opt/fastapi-proxy" {
+		t.Fatalf("fastapi = %#v", fastAPI)
+	}
+	if fastAPI.User == nil || fastAPI.User.Name != "app" {
+		t.Fatalf("fastapi user = %#v", fastAPI.User)
+	}
+	if fastAPI.ReadinessProbe == nil ||
+		fastAPI.ReadinessProbe.FailureThreshold != 4 ||
+		fastAPI.ReadinessProbe.SuccessThreshold != 2 {
+		t.Fatalf("fastapi readiness probe = %#v", fastAPI.ReadinessProbe)
+	}
+
+	prepare := decoded.Main[0]
+	if prepare.Kind != RunToCompletion || prepare.CompletionTimeoutMS != 2_000 {
+		t.Fatalf("prepare = %#v", prepare)
+	}
+	if prepare.ReadinessProbe != nil {
+		t.Fatalf("run-to-completion process has readiness probe: %#v", prepare.ReadinessProbe)
+	}
+
+	app := decoded.Main[1]
+	if app.Kind != Service || app.WorkDir != "/app" {
+		t.Fatalf("app = %#v", app)
+	}
+	if app.User == nil || app.User.UID != 65532 || app.User.GID != 65532 {
+		t.Fatalf("app user = %#v", app.User)
+	}
+
+	worker := decoded.Main[2]
+	if worker.Kind != Service || worker.ReadinessProbe != nil {
+		t.Fatalf("worker = %#v", worker)
 	}
 }
 
-func TestRenderStartEncodesNumericMainUser(t *testing.T) {
-	spec := referenceSpec()
-	spec.Main.User = &ProcessUser{UID: 65532, GID: 65532}
+func TestRenderStartSupportsSidecarOnlySpec(t *testing.T) {
+	spec := Spec{
+		Sidecars: []Process{{
+			Name:    "egress",
+			Command: []string{"/opt/opensandbox-egress/egress"},
+		}},
+	}
 	configuration, err := RenderStart(referenceImages(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded := decodeRenderedSpec(t, configuration)
-	got := decoded.Processes[len(decoded.Processes)-1].User
-	if got == nil || got.UID != 65532 || got.GID != 65532 {
-		t.Fatalf("user = %#v", got)
+	decoded, raw := decodeRuntimeSpec(t, configuration)
+	if len(decoded.Sidecars) != 1 || len(decoded.Main) != 0 {
+		t.Fatalf("runtime declaration = %#v", decoded)
+	}
+	if !strings.Contains(string(raw), `"main":[]`) {
+		t.Fatalf("empty main group must be encoded as an array: %s", raw)
 	}
 }
 
-func TestRenderStartEncodesNamedSidecarUserForSandrun(t *testing.T) {
+func TestRenderStartSupportsMultipleMainProcesses(t *testing.T) {
 	spec := referenceSpec()
-	spec.Sidecars[1].User = &ProcessUser{Name: "app"}
 	configuration, err := RenderStart(referenceImages(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded := decodeRenderedSpec(t, configuration)
-	sidecar := decoded.Processes[1]
-	if sidecar.User != nil {
-		t.Fatalf("campd must start sandrun as root: %#v", sidecar.User)
+	decoded, _ := decodeRuntimeSpec(t, configuration)
+	got := make([]string, 0, len(decoded.Main))
+	for _, process := range decoded.Main {
+		got = append(got, process.Name)
 	}
-	want := []string{
-		defaultSandrunPath,
-		"--rootfs", "/mnt/sandcamp-sidecars/fastapi",
-		"--overlay-device", overlayDevicePath,
-		"--overlay-id", "fastapi",
-		"--standard-mounts",
-		"--workdir", "/opt/fastapi-proxy",
-		"--user", "app",
-		"--",
-		"/usr/local/bin/python", "/opt/fastapi-proxy/app.py",
+	if want := []string{"prepare", "app", "worker"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("main process order = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(sidecar.Argv, want) {
-		t.Fatalf("sidecar argv = %#v, want %#v", sidecar.Argv, want)
+}
+
+func TestRenderStartEncodesExplicitRootMainUser(t *testing.T) {
+	spec := referenceSpec()
+	spec.Main[2].User = &ProcessUser{UID: 0, GID: 0}
+	configuration, err := RenderStart(referenceImages(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _ := decodeRuntimeSpec(t, configuration)
+	got := decoded.Main[2].User
+	if got == nil || got.UID != 0 || got.GID != 0 {
+		t.Fatalf("root user = %#v", got)
 	}
 }
 
@@ -136,7 +170,9 @@ func TestRenderStartOmitsPortsWhenNothingIsExposed(t *testing.T) {
 	for index := range spec.Sidecars {
 		spec.Sidecars[index].Expose = nil
 	}
-	spec.Main.Expose = nil
+	for index := range spec.Main {
+		spec.Main[index].Expose = nil
+	}
 	configuration, err := RenderStart(referenceImages(), spec)
 	if err != nil {
 		t.Fatal(err)
@@ -161,28 +197,81 @@ func TestRenderStartValidation(t *testing.T) {
 		want error
 	}{
 		{
+			name: "no processes",
+			edit: func(spec *Spec) { *spec = Spec{} },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "no service",
+			edit: func(spec *Spec) {
+				spec.Sidecars = nil
+				spec.Main = []Process{{
+					Name:    "prepare",
+					Kind:    RunToCompletion,
+					Command: []string{"/app/prepare"},
+					Timeout: time.Second,
+				}}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
 			name: "startup budget",
-			edit: func(spec *Spec) { spec.Main.StartupProbe.ReadyTimeout = 11 * time.Second },
+			edit: func(spec *Spec) { spec.Main[1].Probe.StartupTimeout = 20 * time.Second },
 			want: ErrStartupBudget,
 		},
 		{
+			name: "missing main name",
+			edit: func(spec *Spec) { spec.Main[1].Name = "" },
+			want: ErrInvalidSpec,
+		},
+		{
 			name: "duplicate process",
-			edit: func(spec *Spec) { spec.Main.Name = "egress" },
+			edit: func(spec *Spec) { spec.Main[1].Name = "egress" },
 			want: ErrDuplicateProcess,
 		},
 		{
 			name: "duplicate port",
-			edit: func(spec *Spec) { spec.Main.Expose = []int{9200} },
+			edit: func(spec *Spec) { spec.Main[1].Expose = []int{9200} },
 			want: ErrDuplicatePort,
 		},
 		{
 			name: "reserved port",
-			edit: func(spec *Spec) { spec.Main.Expose = []int{ControlPort} },
+			edit: func(spec *Spec) { spec.Main[1].Expose = []int{ControlPort} },
 			want: ErrReservedPort,
 		},
 		{
 			name: "relative executable",
 			edit: func(spec *Spec) { spec.Sidecars[0].Command[0] = "usr/bin/egress" },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "invalid kind",
+			edit: func(spec *Spec) { spec.Main[2].Kind = "daemon" },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "service timeout",
+			edit: func(spec *Spec) { spec.Main[2].Timeout = time.Second },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "job without timeout",
+			edit: func(spec *Spec) { spec.Main[0].Timeout = 0 },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "job with probe",
+			edit: func(spec *Spec) { spec.Main[0].Probe = HTTPReadinessProbe("/healthz", 8081) },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "job exposing port",
+			edit: func(spec *Spec) { spec.Main[0].Expose = []int{8081} },
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "invalid failure threshold",
+			edit: func(spec *Spec) { spec.Main[1].Probe.FailureThreshold = -1 },
 			want: ErrInvalidSpec,
 		},
 		{
@@ -202,7 +291,7 @@ func TestRenderStartValidation(t *testing.T) {
 		{
 			name: "named main user",
 			edit: func(spec *Spec) {
-				spec.Main.User = &ProcessUser{Name: "app"}
+				spec.Main[1].User = &ProcessUser{Name: "app"}
 			},
 			want: ErrInvalidSpec,
 		},
@@ -220,7 +309,7 @@ func TestRenderStartValidation(t *testing.T) {
 
 func TestRenderStartRejectsOversizedPayload(t *testing.T) {
 	spec := referenceSpec()
-	spec.Main.Env = map[string]string{"LARGE": strings.Repeat("x", MaxEncodedSpecBytes)}
+	spec.Main[1].Env = map[string]string{"LARGE": strings.Repeat("x", MaxEncodedSpecBytes)}
 	if _, err := RenderStart(referenceImages(), spec); !errors.Is(err, ErrSpecTooLarge) {
 		t.Fatalf("expected size error, got %v", err)
 	}
@@ -250,7 +339,7 @@ func TestRenderMountsRejectsInvalidImages(t *testing.T) {
 	}
 }
 
-func decodeRenderedSpec(t *testing.T, configuration *ags.CustomConfiguration) wireSpec {
+func decodeRuntimeSpec(t *testing.T, configuration *ags.CustomConfiguration) (runtimeSpec, []byte) {
 	t.Helper()
 	if len(configuration.Env) != 1 || *configuration.Env[0].Name != SpecEnvironment {
 		t.Fatalf("environment = %#v", configuration.Env)
@@ -259,11 +348,11 @@ func decodeRenderedSpec(t *testing.T, configuration *ags.CustomConfiguration) wi
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded wireSpec
+	var decoded runtimeSpec
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	return decoded
+	return decoded, raw
 }
 
 func referenceImages() ImageSet {
@@ -297,22 +386,52 @@ func referenceSpec() Spec {
 					"OPENSANDBOX_EGRESS_MODE":  "dns",
 					"OPENSANDBOX_EGRESS_RULES": `{"defaultAction":"deny"}`,
 				},
-				StartupProbe: HTTPStartupProbe("/healthz", 24774),
+				Probe: &ReadinessProbe{
+					Path:           "/healthz",
+					Port:           24774,
+					StartupTimeout: 3 * time.Second,
+				},
 			},
 			{
-				Name:         "fastapi",
-				Command:      []string{"/usr/local/bin/python", "/opt/fastapi-proxy/app.py"},
-				WorkDir:      "/opt/fastapi-proxy",
-				Expose:       []int{9200},
-				StartupProbe: HTTPStartupProbe("/healthz", 9200),
+				Name:    "fastapi",
+				Kind:    Service,
+				Command: []string{"/usr/local/bin/python", "/opt/fastapi-proxy/app.py"},
+				WorkDir: "/opt/fastapi-proxy",
+				User:    &ProcessUser{Name: "app"},
+				Expose:  []int{9200},
+				Probe: &ReadinessProbe{
+					Path:             "/healthz",
+					Port:             9200,
+					StartupTimeout:   4 * time.Second,
+					FailureThreshold: 4,
+					SuccessThreshold: 2,
+				},
 			},
 		},
-		Main: Process{
-			Name:         "app",
-			Command:      []string{"/app/server"},
-			WorkDir:      "/app",
-			Expose:       []int{8080},
-			StartupProbe: HTTPStartupProbe("/healthz", 8080),
+		Main: []Process{
+			{
+				Name:    "prepare",
+				Kind:    RunToCompletion,
+				Command: []string{"/app/prepare"},
+				Timeout: 2 * time.Second,
+			},
+			{
+				Name:    "app",
+				Kind:    Service,
+				Command: []string{"/app/server"},
+				WorkDir: "/app",
+				User:    &ProcessUser{UID: 65532, GID: 65532},
+				Expose:  []int{8080},
+				Probe: &ReadinessProbe{
+					Path:           "/healthz",
+					Port:           8080,
+					StartupTimeout: 5 * time.Second,
+				},
+			},
+			{
+				Name:    "worker",
+				Command: []string{"/app/worker"},
+			},
 		},
 	}
 }

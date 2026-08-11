@@ -10,14 +10,14 @@ import (
 )
 
 const (
-	defaultCampdPath   = "/mnt/sandcamp/bin/campd"
-	defaultSandrunPath = "/mnt/sandcamp/bin/sandrun"
-	overlayDevicePath  = "/dev/vda"
+	defaultCampdPath         = "/mnt/sandcamp/bin/campd"
+	defaultOverlayDevicePath = "/dev/vda"
+	runtimeSpecVersion       = 2
 )
 
-// RenderStart converts image-internal process declarations into the campd
-// startup configuration. Image mounts inherit the Tool's StorageMounts, so no
-// per-instance MountOptions are required. It performs no cloud API operation.
+// RenderStart converts process declarations into the runtime declaration read
+// by campd. Image mounts inherit the Tool's StorageMounts, so no per-instance
+// MountOptions are required. It performs no cloud API operation.
 func RenderStart(images ImageSet, spec Spec) (*ags.CustomConfiguration, error) {
 	resolved, err := resolveImageSet(images)
 	if err != nil {
@@ -80,118 +80,133 @@ func RenderStart(images ImageSet, spec Spec) (*ags.CustomConfiguration, error) {
 	return configuration, nil
 }
 
-type wireSpec struct {
-	Version   int           `json:"version"`
-	Processes []wireProcess `json:"processes"`
+type runtimeSpec struct {
+	Version  int              `json:"version"`
+	Sidecars []runtimeSidecar `json:"sidecars"`
+	Main     []runtimeMain    `json:"main"`
 }
 
-type wireProcess struct {
-	Name         string            `json:"name"`
-	Main         bool              `json:"main,omitempty"`
-	Argv         []string          `json:"argv"`
-	Env          map[string]string `json:"env,omitempty"`
-	WorkDir      string            `json:"workdir,omitempty"`
-	User         *wireUser         `json:"user,omitempty"`
-	StartupProbe *wireProbe        `json:"startup_probe,omitempty"`
+type runtimeProcess struct {
+	Name                string            `json:"name"`
+	Kind                ProcessKind       `json:"kind"`
+	Command             []string          `json:"command"`
+	Env                 map[string]string `json:"env,omitempty"`
+	WorkDir             string            `json:"workdir,omitempty"`
+	ReadinessProbe      *runtimeProbe     `json:"readiness_probe,omitempty"`
+	CompletionTimeoutMS int64             `json:"completion_timeout_ms,omitempty"`
 }
 
-type wireUser struct {
+type runtimeSidecar struct {
+	runtimeProcess
+	RootFS         string            `json:"rootfs"`
+	OverlayDevice  string            `json:"overlay_device,omitempty"`
+	StandardMounts bool              `json:"standard_mounts"`
+	User           *runtimeNamedUser `json:"user,omitempty"`
+}
+
+type runtimeMain struct {
+	runtimeProcess
+	User *runtimeNumericUser `json:"user,omitempty"`
+}
+
+type runtimeNamedUser struct {
+	Name string `json:"name"`
+}
+
+type runtimeNumericUser struct {
 	UID uint32 `json:"uid"`
 	GID uint32 `json:"gid"`
 }
 
-type wireProbe struct {
-	Path           string `json:"path"`
-	Port           int    `json:"port"`
-	ReadyTimeoutMS int64  `json:"ready_timeout_ms"`
-	PeriodMS       int64  `json:"period_ms"`
-	TimeoutMS      int64  `json:"timeout_ms"`
+type runtimeProbe struct {
+	Path             string `json:"path"`
+	Port             int    `json:"port"`
+	StartupTimeoutMS int64  `json:"startup_timeout_ms"`
+	PeriodMS         int64  `json:"period_ms"`
+	TimeoutMS        int64  `json:"timeout_ms"`
+	FailureThreshold int    `json:"failure_threshold"`
+	SuccessThreshold int    `json:"success_threshold"`
 }
 
 func encodeSpec(spec Spec, images resolvedImageSet) (string, error) {
-	wire := wireSpec{
-		Version:   1,
-		Processes: make([]wireProcess, 0, len(spec.Sidecars)+1),
+	runtime := runtimeSpec{
+		Version:  runtimeSpecVersion,
+		Sidecars: make([]runtimeSidecar, 0, len(spec.Sidecars)),
+		Main:     make([]runtimeMain, 0, len(spec.Main)),
 	}
 	for _, process := range spec.Sidecars {
-		wire.Processes = append(
-			wire.Processes,
-			toWireSidecar(process, images.sidecars[process.Name]),
+		runtime.Sidecars = append(
+			runtime.Sidecars,
+			toRuntimeSidecar(process, images.sidecars[process.Name]),
 		)
 	}
-	wire.Processes = append(wire.Processes, toWireMain(spec.Main))
-	encoded, err := json.Marshal(wire)
+	for _, process := range spec.Main {
+		runtime.Main = append(runtime.Main, toRuntimeMain(process))
+	}
+	encoded, err := json.Marshal(runtime)
 	if err != nil {
-		return "", fmt.Errorf("encode startup declaration: %w", err)
+		return "", fmt.Errorf("encode runtime declaration: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(encoded), nil
 }
 
-func toWireSidecar(process Process, image resolvedImage) wireProcess {
-	argv := []string{
-		defaultSandrunPath,
-		"--rootfs", image.mountPath,
-		"--overlay-device", overlayDevicePath,
-		"--overlay-id", process.Name,
-		"--standard-mounts",
-	}
-	if process.WorkDir != "" {
-		argv = append(argv, "--workdir", process.WorkDir)
+func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
+	result := runtimeSidecar{
+		runtimeProcess: toRuntimeProcess(process),
+		RootFS:         image.mountPath,
+		OverlayDevice:  defaultOverlayDevicePath,
+		StandardMounts: true,
 	}
 	if process.User != nil {
-		argv = append(argv, "--user", process.User.Name)
+		result.User = &runtimeNamedUser{Name: process.User.Name}
 	}
-	argv = append(argv, "--")
-	argv = append(argv, process.Command...)
-	result := wireProcess{
-		Name: process.Name,
-		Argv: argv,
-		Env:  cloneEnvironment(process.Env),
-	}
-	attachProbe(&result, process.StartupProbe)
 	return result
 }
 
-func toWireMain(process Process) wireProcess {
-	name := process.Name
-	if name == "" {
-		name = "main"
-	}
-	result := wireProcess{
-		Name:    name,
-		Main:    true,
-		Argv:    append([]string(nil), process.Command...),
-		Env:     cloneEnvironment(process.Env),
-		WorkDir: process.WorkDir,
-	}
+func toRuntimeMain(process Process) runtimeMain {
+	result := runtimeMain{runtimeProcess: toRuntimeProcess(process)}
 	if process.User != nil {
-		result.User = &wireUser{
+		result.User = &runtimeNumericUser{
 			UID: process.User.UID,
 			GID: process.User.GID,
 		}
 	}
-	attachProbe(&result, process.StartupProbe)
 	return result
 }
 
-func attachProbe(result *wireProcess, configured *StartupProbe) {
-	if configured == nil {
-		return
+func toRuntimeProcess(process Process) runtimeProcess {
+	kind, _ := resolveProcessKind(process.Kind)
+	result := runtimeProcess{
+		Name:    process.Name,
+		Kind:    kind,
+		Command: append([]string(nil), process.Command...),
+		Env:     cloneEnvironment(process.Env),
+		WorkDir: process.WorkDir,
 	}
-	probe, _ := resolveProbe(*configured)
-	result.StartupProbe = &wireProbe{
-		Path:           probe.Path,
-		Port:           probe.Port,
-		ReadyTimeoutMS: probe.ReadyTimeout.Milliseconds(),
-		PeriodMS:       probe.Period.Milliseconds(),
-		TimeoutMS:      probe.Timeout.Milliseconds(),
+	if process.Probe != nil {
+		probe, _ := resolveProbe(*process.Probe)
+		result.ReadinessProbe = &runtimeProbe{
+			Path:             probe.Path,
+			Port:             probe.Port,
+			StartupTimeoutMS: probe.StartupTimeout.Milliseconds(),
+			PeriodMS:         probe.Period.Milliseconds(),
+			TimeoutMS:        probe.Timeout.Milliseconds(),
+			FailureThreshold: probe.FailureThreshold,
+			SuccessThreshold: probe.SuccessThreshold,
+		}
 	}
+	if kind == RunToCompletion {
+		result.CompletionTimeoutMS = process.Timeout.Milliseconds()
+	}
+	return result
 }
 
 func exposedPorts(spec Spec) []int {
 	result := make([]int, 0)
-	for _, process := range append(append([]Process(nil), spec.Sidecars...), spec.Main) {
-		result = append(result, process.Expose...)
+	for _, processes := range [][]Process{spec.Sidecars, spec.Main} {
+		for _, process := range processes {
+			result = append(result, process.Expose...)
+		}
 	}
 	sort.Ints(result)
 	return result

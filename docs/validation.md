@@ -1,26 +1,32 @@
 # 验证范围
 
-本文记录当前实现的测试范围和仍需补充的验证项。环境相关的 Tool/Instance ID、镜像
-仓库地址和云端原始响应不提交到仓库。
+本文记录当前自动化覆盖与明确接受的运行边界。普通单元测试不访问云 API，也不会创建
+AGS 资源。
 
-## 自动化测试
+GitHub Actions 在 Pull Request、`main` 更新和手动触发时执行格式、Go/Rust 测试、
+Clippy、静态 Linux 构建与 Docker 整栈回归。当前 CI 不创建 Release，也不推送镜像。
 
-### Go SDK
+## Go SDK
 
 ```bash
 go test ./...
+go vet ./...
 ```
 
 覆盖：
 
-- `ImageSet` 和镜像引用校验；
-- Runtime/Sidecar `StorageMounts` 的稳定名称、路径和只读属性；
-- `Spec`、进程名称、命令、环境变量、WorkDir、端口和探针校验；
-- Main 数字 UID/GID 与 Sidecar 命名用户转换；
-- Tool 默认 `CustomConfiguration` 与 Instance 覆盖配置组合；
-- `SANDCAMP_SPEC` 编码、大小限制和输入不可变性。
+- `ImageSet`、镜像引用、Registry Type 和稳定 Mount Name/Path；
+- Sidecar-only、单/多 Main、Sidecars→Main 顺序；
+- Service 默认 Kind、RunToCompletion Job 与非法生命周期组合；
+- Readiness 默认值、阈值、持续时间和 25 秒启动预算；
+- Main 数字用户、Sidecar 命名用户与错误组合；
+- Command、Env、WorkDir、Expose、保留端口和 120 KiB 编码上限；
+- runtime declaration v2 的 Main/Sidecar 类型分离；
+- Sidecar RootFS 注入、Main 隐式 RootFS 和 AGS Ports 转换；
+- Tool 默认配置与 Instance 配置组合；
+- E2E 36 个场景的 Spec 全量渲染。
 
-### Rust
+## Rust
 
 ```bash
 cargo test --workspace
@@ -30,75 +36,88 @@ RUSTFLAGS='-C linker=rust-lld' \
   --target x86_64-unknown-linux-musl -- -D warnings
 ```
 
-覆盖：
+campd/sandrun 单元测试覆盖：
 
-- campd 声明解析、启动顺序和就绪状态；
-- 进程退出与信号转发；
-- sandrun 参数、挂载目标和用户名校验；
-- 非法 Payload、重复进程和探针预算拒绝。
+- runtime declaration v2 严格反序列化与旧版本拒绝；
+- Main/Sidecar 字段、Kind、用户、Bind、路径、环境和预算校验；
+- campd 构造 sandrun argv；
+- Readiness 成功/失败阈值与恢复；
+- sandrun 参数、Bind/tmpfs 目标、WorkDir 和用户名校验。
 
-## Linux 集成测试
+Linux 上额外执行 5 个 campd 进程集成测试：
 
-构建静态 Linux/amd64 二进制和测试镜像后执行：
+- Main 继承环境、Sidecar 环境隔离、`SANDCAMP_SPEC` 不泄漏；
+- 无 Probe Service 退出后 `/ready=503`，健康 Peer 继续运行；
+- Probe `200→503→200`，且 HTTP 成功不能掩盖 PID 已退出；
+- Job 成功 Gate、非零失败阻止后续 Service；
+- Job 超时后 TERM→KILL 清理进程组，campd 保持存活且未就绪；
+- 外部 SIGTERM 转发与 campd 退出码。
+
+## Linux RootFS 与整栈回归
 
 ```bash
+task test:campd-linux
 task test:sandrun-linux
 task test:stack-linux
 ```
 
 `test-sandrun-linux.sh` 覆盖：
 
-- 只读 OCI lower RootFS 与通用 OverlayFS Copy-on-Write；
+- immutable OCI lower 与 OverlayFS Copy-on-Write；
 - upper 根目录继承 lower `/` 的 UID、GID 和 Mode；
-- writable/readonly Bind、tmpfs 和标准挂载；
-- `pivot_root` 后的 WorkDir；
-- glibc、musl 和静态可执行文件；
-- Overlay Identity 锁和重启复用；
-- 命名用户 UID/GID、空附加组、零 Capabilities 与 `NoNewPrivs=1`；
-- 用户缺失时失败且不回退 root；
-- lowerdir 不被修改；
-- `exec` 后的信号传递。
+- writable/readonly Bind、tmpfs 与标准挂载；
+- `pivot_root` 后 WorkDir；
+- glibc、musl 与静态二进制；
+- Overlay Identity 锁、并发拒绝和重启复用；
+- 命名用户 UID/GID、空附加组、四组零 Capability、`NoNewPrivs=1`；
+- 用户缺失严格失败；
+- lower 不变、exec 信号链路、FastAPI 与 Egress 完整 RootFS。
 
-`test-stack-linux.sh` 覆盖：
+`test-stack-linux.sh` 分别以 root 和 `65532:65532` 主镜像入口执行：
 
-- campd、主进程、FastAPI 和 Egress 的完整启动顺序；
-- root 与非 root Main；
-- HTTP/WebSocket 代理；
-- 共享 Network Namespace 中的 Egress 规则；
-- 主进程与 Sidecar 环境变量隔离；
-- 共享目录和只读配置文件。
+- setuid launcher、PID 1 限制和 Runtime 文件模式；
+- campd→sandrun→FastAPI/Egress→Main 完整顺序；
+- Main 数字用户降权和 `no_new_privs`；
+- HTTP/WebSocket、共享 Loopback 和 Egress allow/deny；
+- Main/Sidecar 环境隔离；
+- Overlay 写入、immutable lower、共享读写目录和只读配置；
+- 外部 SIGTERM 下的进程组关停。
 
-## AGS 集成契约
+## AGS 运行态回归
 
-当前实现已按以下契约完成环境验证：
+[`test/e2e`](../test/e2e/README.md) 是显式运行的云端测试。当前目录包含 36 个场景：
 
-- Runtime、FastAPI 和 Egress 可通过只读 Image Volume 挂载；
-- setuid launcher 可以从非 root 主镜像启动 root campd；
-- campd 完成 Bootstrap 后可将 Main 降权到数字 UID/GID；
-- root Sidecar 与镜像 `/etc/passwd` 命名用户 Sidecar 可以同时启动；
-- Sidecar 在挂载完成后清空附加组和 Capabilities，并设置 `no_new_privs`；
-- AGS 通过 campd `GET :49982/ready` 聚合全部启动探针；
-- Instance 继承 Tool `StorageMounts`，无需实例级 `MountOptions`；
-- Sidecar OverlayFS 写层位于 AGS 提供的 ext4 设备，Image Volume lower 保持只读；
-- 大型 `SANDCAMP_SPEC` 在 120KiB 产品上限内能够完成编码和传递。
+| 范围 | 数量 | 主要内容 |
+| --- | ---: | --- |
+| 启动、组合与 Readiness | 9 | Sidecar-only、多 Main、两类 Init Job、无 Probe Service、持续降级/恢复 |
+| 身份与权限 | 3 | Main 数字用户、Alpine/glibc Sidecar 命名用户 |
+| 文件系统、进程与网络 | 7 | Overlay、argv/env/workdir、Loopback、公网、Fanout、子进程拓扑 |
+| 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、setsid、共享 Probe 端点 |
+| 真实镜像与外部 Runtime | 4 | FastAPI root/命名用户、Egress allow/deny、envd 共存 |
+| 预期拒绝 | 7 | 用户/命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |
 
-云端验证记录应保存在受控环境中，并在共享前移除凭证、账号、Region、Tool ID、
-Instance ID、镜像仓库命名空间和完整请求响应。
+测试专用 Runtime 额外包含 root Observer，通过 `/proc` 和主动 HTTP 请求收集有界证据；
+正式 Runtime 不包含该二进制。证据只保留白名单环境变量，不记录凭证或 Observer
+Token。
 
-## 待补充验证
+## 接受的运行边界
 
-- 不暴露端口时，Tool 默认端口与 Instance 覆盖的完整行为；
-- Runtime 加多个 Sidecar 时的 Image Volume 数量和容量限制；
-- Pause/Resume 与 Snapshot/Restore 后 Mount Namespace 和 Overlay 写层行为；
-- campd 在就绪前退出时的平台状态与日志可观测性；
-- 镜像挂载、OverlayFS 和串行探针的冷启动开销；
-- Stop 与 Timeout 下的优雅退出；
-- 多个并发 Instance 的资源和状态隔离。
+完整云端矩阵保留两个 `boundary` 场景，用证据记录边界，但不会把符合公开语义的行为
+记为失败：
 
-## 不在 Sandcamp 验证范围内
+- `setsid-process-group-boundary`：记录新 Session 后代是否仍存活；campd 不承诺跨
+  Session 回收；
+- `shared-probe-endpoint`：确认 Probe 判断配置的共享 HTTP 端点，不校验响应者 PID。
 
-- Registry/Hub 镜像元数据查询；
-- AGS 鉴权、API 重试和控制面生命周期语义；
-- Pause、Resume、Connect 等官方 SDK 封装；
-- Image Volume 下载和解包；
-- 平台磁盘容量、配额和 Instance 删除后的回收策略。
+外部关停时 campd 会向全部存活进程组转发信号，但不保证 Main 与 Sidecar 的信号先后
+顺序。当前 API 不承诺该顺序。
+
+## 待补充
+
+- Pause/Resume 与 Snapshot/Restore 后的 Mount Namespace 和 Overlay 写层行为；
+- 多个并发 Instance 的磁盘、锁和状态隔离；
+- Runtime 与大量 Image Volume 的容量和冷启动边界；
+- AGS Stop、Timeout 与平台 Probe 策略的长期稳定性矩阵。
+
+云端证据共享前应移除凭证、账号、Region、Tool ID、Instance ID、镜像仓库命名空间和
+完整请求响应。

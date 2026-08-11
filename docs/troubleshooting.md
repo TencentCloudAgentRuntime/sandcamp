@@ -18,8 +18,9 @@
 - Command 第一个元素是否为规范化绝对路径；
 - Env Key 是否合法，Value 是否包含 NUL；
 - WorkDir 是否为规范化绝对路径；
-- UID/GID 是否为数字；
-- Probe Path、端口和时间是否有效。
+- Main 是否使用数字 UID/GID、Sidecar 是否使用命名用户；
+- Kind、Probe 与 Timeout 的组合是否匹配；
+- 声明中是否至少有一个 Service。
 
 ### `encoded startup declaration is too large`
 
@@ -35,10 +36,10 @@
 不要把上限直接设为 128KiB。Linux 对单个 `argv`/`envp` 字符串存在约 128KiB
 边界，编码和平台启动字段还需要额外余量。
 
-### `startup probes exceed the AGS readiness budget`
+### `process startup exceeds the AGS readiness budget`
 
-所有进程的 ReadyTimeout 串行相加超过 25 秒。减少探测数量或缩短超时，避免超过
-AGS 30 秒 `/ready` 门禁。
+所有 Probe `StartupTimeout` 与 RunToCompletion `Timeout` 的声明预算之和超过
+25 秒。减少需要串行等待的 Gate 或缩短上限，避免超过 AGS 30 秒 `/ready` 门禁。
 
 ## 3. Instance 无法启动
 
@@ -101,9 +102,9 @@ Nested Overlay。不要使用主容器普通目录作为 upper；应使用 `/dev
 ### `executable ... does not exist`
 
 对于 Sidecar，`Process.Command[0]` 必须存在于该 Sidecar Image Volume 的根文件
-系统中，而不是主镜像中。调用方只填写完整的 `Process.Command`；SDK 会在内部把
-它放到 sandrun 的 `--` 分隔符之后，不应把 `--` 或 sandrun 参数写入
-`Process.Command`。
+系统中，而不是主镜像中。调用方只填写完整的 `Process.Command`。campd 会构造
+sandrun argv，并在内部把业务命令放到 `--` 分隔符之后；公开 SDK 中没有需要调用方
+填写的 `--`，也不应把 sandrun 参数写入 `Process.Command`。
 
 检查：
 
@@ -124,10 +125,21 @@ Nested Overlay。不要使用主容器普通目录作为 upper；应使用 `/dev
 ### WorkDir 失败
 
 Main 和 Sidecar 都通过 `Process.WorkDir` 声明镜像内工作目录。Main 的 WorkDir
-由 campd 处理；SDK 会把 Sidecar 的 WorkDir 转换为内部 sandrun `--workdir`
-参数，使其在 `pivot_root` 后解析。调用方不应自行拼接 `--workdir`。
+由 campd 直接处理；Sidecar 的 WorkDir 由 campd 转换为 sandrun `--workdir`，在
+`pivot_root` 后解析。调用方不应自行拼接 `--workdir`。
 
-## 6. Bind 失败
+## 6. Init Job 失败
+
+### `run-to-completion process ... failed`
+
+Job 必须在 `Process.Timeout` 内以 0 退出。非零退出、被信号终止、超时，或退出后在
+原进程组留下后代，都会中止后续声明。已经启动的 Service 不会被清理，但 campd
+`/ready` 会保持 503。
+
+Job 超时时 campd 先向该 Job 进程组发送 SIGTERM，5 秒后仍存在则发送 SIGKILL。
+检查 Job 是否使用 `exec`、是否错误地启动后台进程，以及 Timeout 是否覆盖真实耗时。
+
+## 7. Bind 失败
 
 ### Source/Target 类型不匹配
 
@@ -148,7 +160,7 @@ stat -c '%u:%g %a %n' /shared /shared/file
 
 通过目录属主、Group 或 Mode 显式允许跨用户访问。
 
-## 7. 环境变量不符合预期
+## 8. 环境变量不符合预期
 
 ### Sidecar 缺少主镜像 Env
 
@@ -170,12 +182,30 @@ Main 按以下优先级合并：
 
 `SANDCAMP_SPEC` 会在启动子进程前移除。
 
-## 8. Probe 与端口
+## 9. Probe 与端口
 
 ### Sidecar 已监听但 Instance 未 RUNNING
 
-检查 StartupProbe 的 Path、Port 和响应时间。探测从共享 Network Namespace 的
-Loopback 发起，只接受 HTTP 成功响应。
+检查 `Process.Probe` 的 Path、Port、StartupTimeout 与阈值。探测从共享 Network
+Namespace 的 Loopback 发起，HTTP 200–399 视为成功。首次达到成功阈值前，后续声明
+不会启动。
+
+### Instance 已 RUNNING，之后 `/ready` 变为 503
+
+Readiness 会持续执行，不只负责启动。以下任一情况都会使聚合状态变为 503：
+
+- Service 进程退出；
+- Service Probe 连续失败达到 FailureThreshold；
+- 初始化 Job 或后续启动 Gate 失败。
+
+Probe 恢复并达到 SuccessThreshold 后可以重新变为 200；退出的 Service 不会被
+campd 自动重启。
+
+### Probe 通过，但目标进程实际未 Ready
+
+Probe 的公开语义是共享 Loopback 上的 HTTP 端点状态，不是进程身份。检查 Probe
+端口和路径是否指向预期端点，以及是否有较早启动的进程监听或代理了该地址。若业务
+要求 PID 级身份确认，需要使用业务自己的协议；Sandcamp Probe 不提供该保证。
 
 ### Tool 默认端口未被清空
 
@@ -186,12 +216,16 @@ Spec 没有任何 `Expose` 时，Sandcamp 故意不发送 Ports 覆盖，AGS 会
 
 Egress `24774` 仅用于 Loopback 健康检查时，不需要加入 `Expose`。
 
-## 9. 退出和信号
+## 10. 退出和信号
 
 - campd 将 `SIGTERM`、`SIGINT`、`SIGHUP`、`SIGQUIT` 转发到所有进程组。
 - 超过宽限期后升级为 `SIGKILL`。
 - sandrun 最终直接 `execve` Sidecar，不增加中间转发进程。
-- 任一声明进程退出会导致整个 Sandcamp 运行结束，这不是自动重启策略。
+- 单个 Service 退出只会令 `/ready` 变为 503，并清理该进程组的残留后代；其他
+  Service 保持运行。
+- campd 不自动重启退出进程。
+- campd 只保证清理原进程组；主动 `setsid` 的后代不在该保证内。沙箱整体回收由
+  外层运行时负责。
 
 如应用使用 Shell Wrapper，应在脚本末尾使用 `exec`，避免信号停留在 Shell：
 
@@ -199,7 +233,7 @@ Egress `24774` 仅用于 Loopback 健康检查时，不需要加入 `Expose`。
 exec /app/server "$@"
 ```
 
-## 10. 收集问题信息
+## 11. 收集问题信息
 
 提交问题时至少提供：
 

@@ -6,7 +6,10 @@ mod ready;
 #[cfg(target_os = "linux")]
 mod runtime;
 
-pub use spec::{Probe, Process, Spec, SpecError, decode};
+pub use spec::{
+    Bind, MainProcess, NamedUser, NumericUser, Probe, ProcessKind, SidecarProcess, Spec, SpecError,
+    decode,
+};
 
 use std::error::Error;
 use std::io;

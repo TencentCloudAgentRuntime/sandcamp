@@ -105,7 +105,7 @@ fn respond(mut stream: TcpStream, ready: bool) {
     } else if ready {
         ("200 OK", "ready\n")
     } else {
-        ("503 Service Unavailable", "starting\n")
+        ("503 Service Unavailable", "unready\n")
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_starting_then_ready() {
+    fn reports_unready_then_ready() {
         let server = ReadyServer::start("127.0.0.1:0").unwrap();
         assert_eq!(status(server.address()), "HTTP/1.1 503 Service Unavailable");
         server.state().set(true);

@@ -35,8 +35,8 @@ Mount Namespace 和 `pivot_root` 用于保证依赖正确：可执行文件、Dy
 ## 使用方式
 
 下面是直接调用 sandrun 的底层命令行；使用 Go SDK 时只填写
-`Process.Command`、`Process.WorkDir` 和 `Process.User`，`RenderStart` 会生成这些
-参数以及 `--` 分隔符。
+`Process.Command`、`Process.WorkDir` 和 `Process.User`。`RenderStart` 生成结构化
+运行时声明，campd 再构造这些内部参数以及 `--` 分隔符。
 
 ```sh
 sandrun \

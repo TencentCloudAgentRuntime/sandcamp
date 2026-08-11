@@ -6,9 +6,10 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Component, Path};
 
+const RUNTIME_SPEC_VERSION: u8 = 2;
 const MAX_ENCODED_BYTES: usize = 120 * 1024;
 const AGS_READY_TIMEOUT_MS: u64 = 30_000;
-const MAX_STARTUP_PROBE_BUDGET_MS: u64 = 25_000;
+const MAX_STARTUP_BUDGET_MS: u64 = 25_000;
 const CONTROL_PORT: u16 = 49_982;
 const SPEC_ENVIRONMENT: &str = "SANDCAMP_SPEC";
 
@@ -16,31 +17,80 @@ const SPEC_ENVIRONMENT: &str = "SANDCAMP_SPEC";
 #[serde(deny_unknown_fields)]
 pub struct Spec {
     pub version: u8,
-    pub processes: Vec<Process>,
+    pub sidecars: Vec<SidecarProcess>,
+    pub main: Vec<MainProcess>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessKind {
+    Service,
+    RunToCompletion,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Process {
+pub struct SidecarProcess {
     pub name: String,
+    pub kind: ProcessKind,
+    pub rootfs: String,
     #[serde(default)]
-    pub main: bool,
-    pub argv: Vec<String>,
+    pub overlay_device: Option<String>,
+    #[serde(default)]
+    pub standard_mounts: bool,
+    #[serde(default)]
+    pub binds: Vec<Bind>,
+    pub command: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub workdir: String,
     #[serde(default)]
-    pub user: Option<ProcessUser>,
+    pub user: Option<NamedUser>,
     #[serde(default)]
-    pub startup_probe: Option<Probe>,
+    pub readiness_probe: Option<Probe>,
+    #[serde(default)]
+    pub completion_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MainProcess {
+    pub name: String,
+    pub kind: ProcessKind,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub workdir: String,
+    #[serde(default)]
+    pub user: Option<NumericUser>,
+    #[serde(default)]
+    pub readiness_probe: Option<Probe>,
+    #[serde(default)]
+    pub completion_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NamedUser {
+    pub name: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct ProcessUser {
+pub struct NumericUser {
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Bind {
+    pub source: String,
+    pub target: String,
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -48,9 +98,11 @@ pub struct ProcessUser {
 pub struct Probe {
     pub path: String,
     pub port: u16,
-    pub ready_timeout_ms: u64,
+    pub startup_timeout_ms: u64,
     pub period_ms: u64,
     pub timeout_ms: u64,
+    pub failure_threshold: u32,
+    pub success_threshold: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,95 +138,197 @@ pub fn decode(value: &str) -> Result<Spec, SpecError> {
 }
 
 pub fn validate(spec: &Spec) -> Result<(), SpecError> {
-    if spec.version != 1 {
+    if spec.version != RUNTIME_SPEC_VERSION {
         return Err(SpecError::new(format!(
             "unsupported declaration version {}",
             spec.version
         )));
     }
-    if spec.processes.is_empty() {
+    let process_count = spec.sidecars.len() + spec.main.len();
+    if process_count == 0 {
         return Err(SpecError::new("declaration has no processes"));
     }
 
-    let mut names = HashSet::with_capacity(spec.processes.len());
-    let mut main_count = 0_u8;
+    let mut names = HashSet::with_capacity(process_count);
     let mut startup_budget_ms = 0_u64;
-    for (index, process) in spec.processes.iter().enumerate() {
-        if !valid_name(&process.name) {
+    let mut service_count = 0_usize;
+
+    for process in &spec.sidecars {
+        validate_common(
+            &process.name,
+            process.kind,
+            &process.command,
+            &process.env,
+            &process.workdir,
+            process.readiness_probe.as_ref(),
+            process.completion_timeout_ms,
+            &mut names,
+            &mut startup_budget_ms,
+            &mut service_count,
+        )?;
+        if !valid_path(&process.rootfs, false) {
             return Err(SpecError::new(format!(
-                "process {} has an invalid name",
+                "sidecar {} rootfs must be a clean absolute path",
                 process.name
             )));
         }
-        if !names.insert(&process.name) {
+        if let Some(device) = &process.overlay_device
+            && !valid_path(device, false)
+        {
             return Err(SpecError::new(format!(
-                "process {} is duplicated",
+                "sidecar {} overlay device must be a clean absolute path",
                 process.name
             )));
         }
-        if process.main {
-            main_count += 1;
-            if index + 1 != spec.processes.len() {
-                return Err(SpecError::new("main process must be last"));
+        if let Some(user) = &process.user
+            && !valid_user_name(&user.name)
+        {
+            return Err(SpecError::new(format!(
+                "sidecar {} user name is invalid",
+                process.name
+            )));
+        }
+        let mut bind_targets = HashSet::with_capacity(process.binds.len());
+        for bind in &process.binds {
+            if !valid_path(&bind.source, false) || !valid_path(&bind.target, false) {
+                return Err(SpecError::new(format!(
+                    "sidecar {} bind paths must be clean and absolute",
+                    process.name
+                )));
+            }
+            if !bind_targets.insert(&bind.target) {
+                return Err(SpecError::new(format!(
+                    "sidecar {} bind target {} is duplicated",
+                    process.name, bind.target
+                )));
             }
         }
-        if process.argv.is_empty() || !valid_path(&process.argv[0], false) {
-            return Err(SpecError::new(format!(
-                "process {} executable must be a clean absolute path",
-                process.name
-            )));
-        }
-        if process.argv.iter().any(|value| value.contains('\0')) {
-            return Err(SpecError::new(format!(
-                "process {} argv contains NUL",
-                process.name
-            )));
-        }
-        if !process.workdir.is_empty() && !valid_path(&process.workdir, true) {
-            return Err(SpecError::new(format!(
-                "process {} workdir must be a clean absolute path",
-                process.name
-            )));
-        }
+    }
+
+    for process in &spec.main {
+        validate_common(
+            &process.name,
+            process.kind,
+            &process.command,
+            &process.env,
+            &process.workdir,
+            process.readiness_probe.as_ref(),
+            process.completion_timeout_ms,
+            &mut names,
+            &mut startup_budget_ms,
+            &mut service_count,
+        )?;
         if let Some(user) = process.user
             && (user.uid == u32::MAX || user.gid == u32::MAX)
         {
             return Err(SpecError::new(format!(
-                "process {} user contains the reserved UID/GID value",
+                "main process {} user contains the reserved UID/GID value",
                 process.name
             )));
         }
-        for (key, value) in &process.env {
-            if !valid_environment_name(key) || value.contains('\0') {
-                return Err(SpecError::new(format!(
-                    "process {} has invalid environment variable {}",
-                    process.name, key
-                )));
-            }
-            if key == SPEC_ENVIRONMENT {
-                return Err(SpecError::new(format!(
-                    "process {} cannot override {}",
-                    process.name, SPEC_ENVIRONMENT
-                )));
-            }
-        }
-        if let Some(probe) = &process.startup_probe {
-            validate_probe(&process.name, probe)?;
-            startup_budget_ms = startup_budget_ms
-                .checked_add(probe.ready_timeout_ms)
-                .ok_or_else(|| SpecError::new("startup probe budget overflow"))?;
-        }
     }
-    if main_count != 1 {
+
+    if service_count == 0 {
         return Err(SpecError::new(
-            "declaration must contain exactly one main process",
+            "declaration must contain at least one service",
         ));
     }
-    if startup_budget_ms > MAX_STARTUP_PROBE_BUDGET_MS {
+    if startup_budget_ms > MAX_STARTUP_BUDGET_MS {
         return Err(SpecError::new(format!(
-            "startup probe budget {startup_budget_ms}ms exceeds the 25000ms limit reserved inside AGS's 30000ms deadline"
+            "startup budget {startup_budget_ms}ms exceeds the 25000ms limit reserved inside AGS's 30000ms deadline"
         )));
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_common(
+    name: &str,
+    kind: ProcessKind,
+    command: &[String],
+    env: &BTreeMap<String, String>,
+    workdir: &str,
+    probe: Option<&Probe>,
+    completion_timeout_ms: Option<u64>,
+    names: &mut HashSet<String>,
+    startup_budget_ms: &mut u64,
+    service_count: &mut usize,
+) -> Result<(), SpecError> {
+    if !valid_name(name) {
+        return Err(SpecError::new(format!(
+            "process {name} has an invalid name"
+        )));
+    }
+    if !names.insert(name.to_owned()) {
+        return Err(SpecError::new(format!("process {name} is duplicated")));
+    }
+    if command.is_empty() || !valid_path(&command[0], false) {
+        return Err(SpecError::new(format!(
+            "process {name} executable must be a clean absolute path"
+        )));
+    }
+    if command.iter().any(|value| value.contains('\0')) {
+        return Err(SpecError::new(format!(
+            "process {name} command contains NUL"
+        )));
+    }
+    if !workdir.is_empty() && !valid_path(workdir, true) {
+        return Err(SpecError::new(format!(
+            "process {name} workdir must be a clean absolute path"
+        )));
+    }
+    for (key, value) in env {
+        if !valid_environment_name(key) || value.contains('\0') {
+            return Err(SpecError::new(format!(
+                "process {name} has invalid environment variable {key}"
+            )));
+        }
+        if key == SPEC_ENVIRONMENT {
+            return Err(SpecError::new(format!(
+                "process {name} cannot override {SPEC_ENVIRONMENT}"
+            )));
+        }
+    }
+
+    match kind {
+        ProcessKind::Service => {
+            *service_count += 1;
+            if completion_timeout_ms.is_some() {
+                return Err(SpecError::new(format!(
+                    "service process {name} cannot set completion timeout"
+                )));
+            }
+            if let Some(probe) = probe {
+                validate_probe(name, probe)?;
+                add_startup_budget(startup_budget_ms, probe.startup_timeout_ms)?;
+            }
+        }
+        ProcessKind::RunToCompletion => {
+            if probe.is_some() {
+                return Err(SpecError::new(format!(
+                    "run-to-completion process {name} cannot set a readiness probe"
+                )));
+            }
+            let timeout = completion_timeout_ms.ok_or_else(|| {
+                SpecError::new(format!(
+                    "run-to-completion process {name} requires completion timeout"
+                ))
+            })?;
+            if !(100..=AGS_READY_TIMEOUT_MS).contains(&timeout) {
+                return Err(SpecError::new(format!(
+                    "process {name} completion timeout is outside AGS limits"
+                )));
+            }
+            add_startup_budget(startup_budget_ms, timeout)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_startup_budget(budget: &mut u64, duration: u64) -> Result<(), SpecError> {
+    *budget = budget
+        .checked_add(duration)
+        .ok_or_else(|| SpecError::new("startup budget overflow"))?;
     Ok(())
 }
 
@@ -194,9 +348,9 @@ fn validate_probe(name: &str, probe: &Probe) -> Result<(), SpecError> {
             "process {name} probe port is reserved by campd"
         )));
     }
-    if !(1_000..=AGS_READY_TIMEOUT_MS).contains(&probe.ready_timeout_ms) {
+    if !(1_000..=AGS_READY_TIMEOUT_MS).contains(&probe.startup_timeout_ms) {
         return Err(SpecError::new(format!(
-            "process {name} probe ready timeout is outside AGS limits"
+            "process {name} probe startup timeout is outside AGS limits"
         )));
     }
     for (label, value) in [("period", probe.period_ms), ("timeout", probe.timeout_ms)] {
@@ -206,9 +360,14 @@ fn validate_probe(name: &str, probe: &Probe) -> Result<(), SpecError> {
             )));
         }
     }
-    if probe.timeout_ms > probe.ready_timeout_ms {
+    if probe.timeout_ms > probe.startup_timeout_ms {
         return Err(SpecError::new(format!(
-            "process {name} probe timeout exceeds ready timeout"
+            "process {name} probe timeout exceeds startup timeout"
+        )));
+    }
+    if probe.failure_threshold == 0 || probe.success_threshold == 0 {
+        return Err(SpecError::new(format!(
+            "process {name} probe thresholds must be positive"
         )));
     }
     Ok(())
@@ -250,6 +409,16 @@ fn valid_name(value: &str) -> bool {
             .all(|value| value.is_ascii_alphanumeric() || matches!(*value, b'_' | b'.' | b'-'))
 }
 
+fn valid_user_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(*value, b'_' | b'.' | b'-'))
+}
+
 fn valid_environment_name(value: &str) -> bool {
     let mut bytes = value.bytes();
     matches!(bytes.next(), Some(first) if first.is_ascii_alphabetic() || first == b'_')
@@ -257,6 +426,9 @@ fn valid_environment_name(value: &str) -> bool {
 }
 
 fn valid_path(value: &str, allow_root: bool) -> bool {
+    if value.contains('\0') {
+        return false;
+    }
     let path = Path::new(value);
     path.is_absolute()
         && (allow_root || path != Path::new("/"))
@@ -269,74 +441,148 @@ fn valid_path(value: &str, allow_root: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn probe(port: u16, startup_timeout_ms: u64) -> Probe {
+        Probe {
+            path: "/healthz".into(),
+            port,
+            startup_timeout_ms,
+            period_ms: 500,
+            timeout_ms: 1_000,
+            failure_threshold: 3,
+            success_threshold: 1,
+        }
+    }
+
     fn valid_spec() -> Spec {
         Spec {
-            version: 1,
-            processes: vec![
-                Process {
-                    name: "proxy".into(),
-                    main: false,
-                    argv: vec!["/bin/proxy".into()],
+            version: 2,
+            sidecars: vec![SidecarProcess {
+                name: "proxy".into(),
+                kind: ProcessKind::Service,
+                rootfs: "/mnt/proxy".into(),
+                overlay_device: Some("/dev/vda".into()),
+                standard_mounts: true,
+                binds: Vec::new(),
+                command: vec!["/bin/proxy".into()],
+                env: BTreeMap::new(),
+                workdir: String::new(),
+                user: Some(NamedUser { name: "app".into() }),
+                readiness_probe: Some(probe(9200, 10_000)),
+                completion_timeout_ms: None,
+            }],
+            main: vec![
+                MainProcess {
+                    name: "prepare".into(),
+                    kind: ProcessKind::RunToCompletion,
+                    command: vec!["/app/prepare".into()],
                     env: BTreeMap::new(),
                     workdir: String::new(),
                     user: None,
-                    startup_probe: Some(Probe {
-                        path: "/healthz".into(),
-                        port: 9200,
-                        ready_timeout_ms: 10_000,
-                        period_ms: 500,
-                        timeout_ms: 1_000,
-                    }),
+                    readiness_probe: None,
+                    completion_timeout_ms: Some(1_000),
                 },
-                Process {
-                    name: "main".into(),
-                    main: true,
-                    argv: vec!["/app/server".into()],
+                MainProcess {
+                    name: "api".into(),
+                    kind: ProcessKind::Service,
+                    command: vec!["/app/server".into()],
                     env: BTreeMap::new(),
                     workdir: "/app".into(),
-                    user: None,
-                    startup_probe: None,
+                    user: Some(NumericUser {
+                        uid: 65_532,
+                        gid: 65_532,
+                    }),
+                    readiness_probe: None,
+                    completion_timeout_ms: None,
                 },
             ],
         }
     }
 
     #[test]
-    fn accepts_minimal_startup_contract() {
+    fn accepts_grouped_runtime_contract() {
         assert_eq!(validate(&valid_spec()), Ok(()));
     }
 
     #[test]
-    fn accepts_numeric_process_user() {
-        let mut spec = valid_spec();
-        spec.processes[1].user = Some(ProcessUser {
-            uid: 65_532,
-            gid: 65_532,
+    fn accepts_sidecar_only_and_multiple_main_services() {
+        let mut sidecar_only = valid_spec();
+        sidecar_only.main.clear();
+        assert_eq!(validate(&sidecar_only), Ok(()));
+
+        let mut multiple_main = valid_spec();
+        multiple_main.main.push(MainProcess {
+            name: "worker".into(),
+            kind: ProcessKind::Service,
+            command: vec!["/app/worker".into()],
+            env: BTreeMap::new(),
+            workdir: String::new(),
+            user: None,
+            readiness_probe: None,
+            completion_timeout_ms: None,
         });
-        assert_eq!(validate(&spec), Ok(()));
+        assert_eq!(validate(&multiple_main), Ok(()));
     }
 
     #[test]
-    fn rejects_multiple_mains_and_nonfinal_main() {
+    fn rejects_invalid_lifecycle_combinations() {
         let mut spec = valid_spec();
-        spec.processes[0].main = true;
+        spec.main[0].completion_timeout_ms = None;
         assert!(
             validate(&spec)
                 .unwrap_err()
                 .to_string()
-                .contains("main process")
+                .contains("requires")
+        );
+
+        let mut spec = valid_spec();
+        spec.main[0].readiness_probe = Some(probe(8081, 1_000));
+        assert!(
+            validate(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot set a readiness probe")
+        );
+
+        let mut spec = valid_spec();
+        spec.main[1].completion_timeout_ms = Some(1_000);
+        assert!(
+            validate(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("service process")
+        );
+
+        let mut jobs_only = valid_spec();
+        jobs_only.sidecars[0].kind = ProcessKind::RunToCompletion;
+        jobs_only.sidecars[0].readiness_probe = None;
+        jobs_only.sidecars[0].completion_timeout_ms = Some(1_000);
+        jobs_only.main.truncate(1);
+        assert!(
+            validate(&jobs_only)
+                .unwrap_err()
+                .to_string()
+                .contains("at least one service")
         );
     }
 
     #[test]
-    fn rejects_features_outside_the_contract() {
-        let json = r#"{"version":1,"processes":[{"name":"main","main":true,"argv":["/bin/app"],"restart":"always"}]}"#;
+    fn rejects_unknown_fields_and_old_version() {
+        let json = r#"{"version":2,"sidecars":[],"main":[{"name":"api","kind":"service","command":["/bin/app"],"restart":"always"}]}"#;
         let value = STANDARD.encode(json);
         assert!(
             decode(&value)
                 .unwrap_err()
                 .to_string()
                 .contains("unknown field")
+        );
+
+        let mut spec = valid_spec();
+        spec.version = 1;
+        assert!(
+            validate(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported declaration version")
         );
     }
 
@@ -352,14 +598,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_probe_budget_beyond_ags_deadline() {
+    fn rejects_startup_budget_beyond_ags_deadline() {
         let mut spec = valid_spec();
-        spec.processes[1].startup_probe = spec.processes[0].startup_probe.clone();
-        spec.processes[0]
-            .startup_probe
+        spec.sidecars[0]
+            .readiness_probe
             .as_mut()
             .unwrap()
-            .ready_timeout_ms = 20_001;
+            .startup_timeout_ms = 25_000;
         assert!(
             validate(&spec)
                 .unwrap_err()
@@ -369,9 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_runtime_environment_and_control_probe() {
+    fn rejects_runtime_environment_users_and_control_probe() {
         let mut spec = valid_spec();
-        spec.processes[0]
+        spec.sidecars[0]
             .env
             .insert(SPEC_ENVIRONMENT.into(), "replacement".into());
         assert!(
@@ -382,7 +627,7 @@ mod tests {
         );
 
         let mut spec = valid_spec();
-        spec.processes[0].startup_probe.as_mut().unwrap().port = CONTROL_PORT;
+        spec.sidecars[0].readiness_probe.as_mut().unwrap().port = CONTROL_PORT;
         assert!(
             validate(&spec)
                 .unwrap_err()
@@ -391,16 +636,18 @@ mod tests {
         );
 
         let mut spec = valid_spec();
-        spec.processes[0].startup_probe.as_mut().unwrap().path = "/health z#fragment".into();
+        spec.sidecars[0].user = Some(NamedUser {
+            name: "../app".into(),
+        });
         assert!(
             validate(&spec)
                 .unwrap_err()
                 .to_string()
-                .contains("probe path is invalid")
+                .contains("user name is invalid")
         );
 
         let mut spec = valid_spec();
-        spec.processes[1].user = Some(ProcessUser {
+        spec.main[1].user = Some(NumericUser {
             uid: u32::MAX,
             gid: 65_532,
         });

@@ -1,6 +1,5 @@
-// Package testwire renders raw campd declarations for Sandcamp's own
-// integration harnesses. It is internal so customer code cannot bypass the
-// public ImageSet/RenderStart abstraction.
+// Package testwire renders runtime declarations with test-only filesystem
+// options used by Sandcamp's Linux integration harnesses.
 package testwire
 
 import (
@@ -13,40 +12,80 @@ import (
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 
-type wireSpec struct {
-	Version   int           `json:"version"`
-	Processes []wireProcess `json:"processes"`
+type Bind struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
-type wireProcess struct {
-	Name         string            `json:"name"`
-	Main         bool              `json:"main,omitempty"`
-	Argv         []string          `json:"argv"`
-	Env          map[string]string `json:"env,omitempty"`
-	WorkDir      string            `json:"workdir,omitempty"`
-	User         *wireUser         `json:"user,omitempty"`
-	StartupProbe *wireProbe        `json:"startup_probe,omitempty"`
+type SidecarRuntime struct {
+	RootFS         string
+	OverlayDevice  string
+	StandardMounts bool
+	Binds          []Bind
 }
 
-type wireUser struct {
+type runtimeSpec struct {
+	Version  int              `json:"version"`
+	Sidecars []runtimeSidecar `json:"sidecars"`
+	Main     []runtimeMain    `json:"main"`
+}
+
+type runtimeProcess struct {
+	Name                string               `json:"name"`
+	Kind                sandcamp.ProcessKind `json:"kind"`
+	Command             []string             `json:"command"`
+	Env                 map[string]string    `json:"env,omitempty"`
+	WorkDir             string               `json:"workdir,omitempty"`
+	ReadinessProbe      *runtimeProbe        `json:"readiness_probe,omitempty"`
+	CompletionTimeoutMS int64                `json:"completion_timeout_ms,omitempty"`
+}
+
+type runtimeSidecar struct {
+	runtimeProcess
+	RootFS         string            `json:"rootfs"`
+	OverlayDevice  string            `json:"overlay_device,omitempty"`
+	StandardMounts bool              `json:"standard_mounts"`
+	Binds          []Bind            `json:"binds,omitempty"`
+	User           *runtimeNamedUser `json:"user,omitempty"`
+}
+
+type runtimeMain struct {
+	runtimeProcess
+	User *runtimeNumericUser `json:"user,omitempty"`
+}
+
+type runtimeNamedUser struct {
+	Name string `json:"name"`
+}
+
+type runtimeNumericUser struct {
 	UID uint32 `json:"uid"`
 	GID uint32 `json:"gid"`
 }
 
-type wireProbe struct {
-	Path           string `json:"path"`
-	Port           int    `json:"port"`
-	ReadyTimeoutMS int64  `json:"ready_timeout_ms"`
-	PeriodMS       int64  `json:"period_ms"`
-	TimeoutMS      int64  `json:"timeout_ms"`
+type runtimeProbe struct {
+	Path             string `json:"path"`
+	Port             int    `json:"port"`
+	StartupTimeoutMS int64  `json:"startup_timeout_ms"`
+	PeriodMS         int64  `json:"period_ms"`
+	TimeoutMS        int64  `json:"timeout_ms"`
+	FailureThreshold int    `json:"failure_threshold"`
+	SuccessThreshold int    `json:"success_threshold"`
 }
 
-// Render preserves the raw argv used by low-level mount and signal tests.
-func Render(spec sandcamp.Spec) (*ags.CustomConfiguration, error) {
+// Render preserves test-only bind and local-overlay settings while using the
+// same runtime declaration contract as the public renderer.
+func Render(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (*ags.CustomConfiguration, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	payload, err := encode(spec)
+	for _, process := range spec.Sidecars {
+		if _, exists := sidecars[process.Name]; !exists {
+			return nil, fmt.Errorf("sidecar process %s has no test runtime", process.Name)
+		}
+	}
+	payload, err := encode(spec, sidecars)
 	if err != nil {
 		return nil, err
 	}
@@ -95,56 +134,73 @@ func Render(spec sandcamp.Spec) (*ags.CustomConfiguration, error) {
 	}, nil
 }
 
-func encode(spec sandcamp.Spec) (string, error) {
-	wire := wireSpec{
-		Version:   1,
-		Processes: make([]wireProcess, 0, len(spec.Sidecars)+1),
+func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, error) {
+	runtime := runtimeSpec{
+		Version:  2,
+		Sidecars: make([]runtimeSidecar, 0, len(spec.Sidecars)),
+		Main:     make([]runtimeMain, 0, len(spec.Main)),
 	}
 	for _, process := range spec.Sidecars {
-		wire.Processes = append(wire.Processes, toWireProcess(process, false))
+		configured := sidecars[process.Name]
+		rendered := runtimeSidecar{
+			runtimeProcess: toRuntimeProcess(process),
+			RootFS:         configured.RootFS,
+			OverlayDevice:  configured.OverlayDevice,
+			StandardMounts: configured.StandardMounts,
+			Binds:          append([]Bind(nil), configured.Binds...),
+		}
+		if process.User != nil {
+			rendered.User = &runtimeNamedUser{Name: process.User.Name}
+		}
+		runtime.Sidecars = append(runtime.Sidecars, rendered)
 	}
-	wire.Processes = append(wire.Processes, toWireProcess(spec.Main, true))
-	encoded, err := json.Marshal(wire)
+	for _, process := range spec.Main {
+		rendered := runtimeMain{runtimeProcess: toRuntimeProcess(process)}
+		if process.User != nil {
+			rendered.User = &runtimeNumericUser{UID: process.User.UID, GID: process.User.GID}
+		}
+		runtime.Main = append(runtime.Main, rendered)
+	}
+	encoded, err := json.Marshal(runtime)
 	if err != nil {
-		return "", fmt.Errorf("encode raw test declaration: %w", err)
+		return "", fmt.Errorf("encode test runtime declaration: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(encoded), nil
 }
 
-func toWireProcess(process sandcamp.Process, main bool) wireProcess {
-	name := process.Name
-	if main && name == "" {
-		name = "main"
+func toRuntimeProcess(process sandcamp.Process) runtimeProcess {
+	kind := process.Kind
+	if kind == "" {
+		kind = sandcamp.Service
 	}
-	result := wireProcess{
-		Name:    name,
-		Main:    main,
-		Argv:    append([]string(nil), process.Command...),
+	result := runtimeProcess{
+		Name:    process.Name,
+		Kind:    kind,
+		Command: append([]string(nil), process.Command...),
 		Env:     cloneEnvironment(process.Env),
 		WorkDir: process.WorkDir,
 	}
-	if process.User != nil {
-		result.User = &wireUser{
-			UID: process.User.UID,
-			GID: process.User.GID,
+	if process.Probe != nil {
+		probe := resolvedProbe(*process.Probe)
+		result.ReadinessProbe = &runtimeProbe{
+			Path:             probe.Path,
+			Port:             probe.Port,
+			StartupTimeoutMS: probe.StartupTimeout.Milliseconds(),
+			PeriodMS:         probe.Period.Milliseconds(),
+			TimeoutMS:        probe.Timeout.Milliseconds(),
+			FailureThreshold: probe.FailureThreshold,
+			SuccessThreshold: probe.SuccessThreshold,
 		}
 	}
-	if process.StartupProbe != nil {
-		probe := resolvedProbe(*process.StartupProbe)
-		result.StartupProbe = &wireProbe{
-			Path:           probe.Path,
-			Port:           probe.Port,
-			ReadyTimeoutMS: probe.ReadyTimeout.Milliseconds(),
-			PeriodMS:       probe.Period.Milliseconds(),
-			TimeoutMS:      probe.Timeout.Milliseconds(),
-		}
+	if kind == sandcamp.RunToCompletion {
+		result.CompletionTimeoutMS = process.Timeout.Milliseconds()
 	}
 	return result
 }
 
-func resolvedProbe(probe sandcamp.StartupProbe) sandcamp.StartupProbe {
-	if probe.ReadyTimeout == 0 {
-		probe.ReadyTimeout = sandcamp.DefaultReadyTimeout
+func resolvedProbe(probe sandcamp.ReadinessProbe) sandcamp.ReadinessProbe {
+	if probe.StartupTimeout == 0 {
+		probe.StartupTimeout = sandcamp.DefaultStartupTimeout
 	}
 	if probe.Period == 0 {
 		probe.Period = sandcamp.DefaultProbePeriod
@@ -152,13 +208,21 @@ func resolvedProbe(probe sandcamp.StartupProbe) sandcamp.StartupProbe {
 	if probe.Timeout == 0 {
 		probe.Timeout = sandcamp.DefaultProbeTimeout
 	}
+	if probe.FailureThreshold == 0 {
+		probe.FailureThreshold = sandcamp.DefaultFailureThreshold
+	}
+	if probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = sandcamp.DefaultSuccessThreshold
+	}
 	return probe
 }
 
 func exposedPorts(spec sandcamp.Spec) []int {
 	result := make([]int, 0)
-	for _, process := range append(append([]sandcamp.Process(nil), spec.Sidecars...), spec.Main) {
-		result = append(result, process.Expose...)
+	for _, processes := range [][]sandcamp.Process{spec.Sidecars, spec.Main} {
+		for _, process := range processes {
+			result = append(result, process.Expose...)
+		}
 	}
 	sort.Ints(result)
 	return result

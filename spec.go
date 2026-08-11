@@ -10,25 +10,27 @@ import (
 )
 
 const (
-	ControlPort            = 49982
-	MaxExposedPorts        = 8
-	MaxEncodedSpecBytes    = 120 * 1024
-	AGSReadyTimeout        = 30 * time.Second
-	StartupOverheadReserve = 5 * time.Second
-	MaxStartupProbeBudget  = AGSReadyTimeout - StartupOverheadReserve
-	DefaultReadyTimeout    = 8 * time.Second
-	DefaultProbePeriod     = 500 * time.Millisecond
-	DefaultProbeTimeout    = time.Second
-	SpecEnvironment        = "SANDCAMP_SPEC"
-	AGSLogSidecarPort      = 32000
-	AGSAIOSidecarPort      = 57890
+	ControlPort             = 49982
+	MaxExposedPorts         = 8
+	MaxEncodedSpecBytes     = 120 * 1024
+	AGSReadyTimeout         = 30 * time.Second
+	StartupOverheadReserve  = 5 * time.Second
+	MaxStartupBudget        = AGSReadyTimeout - StartupOverheadReserve
+	DefaultStartupTimeout   = 8 * time.Second
+	DefaultProbePeriod      = 500 * time.Millisecond
+	DefaultProbeTimeout     = time.Second
+	DefaultFailureThreshold = 3
+	DefaultSuccessThreshold = 1
+	SpecEnvironment         = "SANDCAMP_SPEC"
+	AGSLogSidecarPort       = 32000
+	AGSAIOSidecarPort       = 57890
 )
 
 var (
 	ErrInvalidSpec      = errors.New("invalid startup declaration")
 	ErrTooManyPorts     = errors.New("too many exposed ports")
 	ErrSpecTooLarge     = errors.New("encoded startup declaration is too large")
-	ErrStartupBudget    = errors.New("startup probes exceed the AGS readiness budget")
+	ErrStartupBudget    = errors.New("process startup exceeds the AGS readiness budget")
 	ErrReservedPort     = errors.New("port is reserved by sandcamp")
 	ErrDuplicateProcess = errors.New("process name is duplicated")
 	ErrDuplicatePort    = errors.New("exposed port is duplicated")
@@ -40,24 +42,38 @@ var (
 	userNamePattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`)
 )
 
+// ProcessKind controls whether campd keeps supervising a process or waits for
+// it to complete before starting the next declaration.
+type ProcessKind string
+
+const (
+	Service         ProcessKind = "service"
+	RunToCompletion ProcessKind = "run-to-completion"
+)
+
 // Spec declares only the processes needed to make one AGS sandbox start.
-// Sidecars are started in declaration order; Main is started last.
+// Sidecars are processed first in declaration order, followed by Main. Every
+// Main process runs in the AGS main image; every Sidecar runs in its matching
+// Image Volume.
 type Spec struct {
 	Sidecars []Process
-	Main     Process
+	Main     []Process
 }
 
-// Process is an executable plus its minimum startup metadata. Command[0] and
-// WorkDir are absolute paths inside that process's image. RenderStart adds all
-// Sandcamp Runtime and filesystem-isolation arguments for sidecars.
+// Process is an executable plus its lifecycle and readiness metadata.
+// Command[0] and WorkDir are absolute paths inside that process's image.
 type Process struct {
-	Name         string
-	Command      []string
-	Env          map[string]string
-	WorkDir      string
-	User         *ProcessUser
-	Expose       []int
-	StartupProbe *StartupProbe
+	Name string
+	// Kind defaults to Service when omitted.
+	Kind    ProcessKind
+	Command []string
+	Env     map[string]string
+	WorkDir string
+	User    *ProcessUser
+	Expose  []int
+
+	Probe   *ReadinessProbe // Service only.
+	Timeout time.Duration   // RunToCompletion only.
 }
 
 // ProcessUser selects a process identity. Main processes use numeric UID/GID.
@@ -70,106 +86,118 @@ type ProcessUser struct {
 	GID  uint32
 }
 
-// StartupProbe is an HTTP GET against loopback. It is evaluated only during
-// startup; AGS continues to probe campd's /ready endpoint afterwards.
-type StartupProbe struct {
-	Path         string
-	Port         int
-	ReadyTimeout time.Duration
-	Period       time.Duration
-	Timeout      time.Duration
+// ReadinessProbe is an HTTP GET against the sandbox loopback interface. Its
+// first success gates the next declaration; campd continues evaluating it
+// after startup so aggregate readiness can change and recover.
+type ReadinessProbe struct {
+	Path             string
+	Port             int
+	StartupTimeout   time.Duration
+	Period           time.Duration
+	Timeout          time.Duration
+	FailureThreshold int
+	SuccessThreshold int
 }
 
-// HTTPStartupProbe returns a probe with AGS-compatible timing defaults.
-func HTTPStartupProbe(path string, port int) *StartupProbe {
-	return &StartupProbe{Path: path, Port: port}
+// HTTPReadinessProbe returns a probe with AGS-compatible timing defaults.
+func HTTPReadinessProbe(path string, port int) *ReadinessProbe {
+	return &ReadinessProbe{Path: path, Port: port}
 }
 
 func (spec Spec) Validate() error {
-	names := make(map[string]struct{}, len(spec.Sidecars)+1)
+	processCount := len(spec.Sidecars) + len(spec.Main)
+	if processCount == 0 {
+		return fmt.Errorf("%w: declaration has no processes", ErrInvalidSpec)
+	}
+
+	names := make(map[string]struct{}, processCount)
 	ports := make(map[int]struct{})
 	startupBudget := time.Duration(0)
+	serviceCount := 0
 
 	for index, process := range spec.Sidecars {
 		if process.Name == "" {
 			return fmt.Errorf("%w: sidecars[%d].name is required", ErrInvalidSpec, index)
 		}
-		if err := validateProcess(process, process.Name, true, names, ports, &startupBudget); err != nil {
+		if err := validateProcess(process, true, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
 		}
 	}
-
-	mainName := spec.Main.Name
-	if mainName == "" {
-		mainName = "main"
+	for index, process := range spec.Main {
+		if process.Name == "" {
+			return fmt.Errorf("%w: main[%d].name is required", ErrInvalidSpec, index)
+		}
+		if err := validateProcess(process, false, names, ports, &startupBudget, &serviceCount); err != nil {
+			return err
+		}
 	}
-	if err := validateProcess(spec.Main, mainName, false, names, ports, &startupBudget); err != nil {
-		return err
+	if serviceCount == 0 {
+		return fmt.Errorf("%w: declaration must contain at least one service", ErrInvalidSpec)
 	}
 	if len(ports) > MaxExposedPorts {
 		return fmt.Errorf("%w: got %d, maximum is %d", ErrTooManyPorts, len(ports), MaxExposedPorts)
 	}
-	if startupBudget > MaxStartupProbeBudget {
-		return fmt.Errorf("%w: declared %s, maximum is %s", ErrStartupBudget, startupBudget, MaxStartupProbeBudget)
+	if startupBudget > MaxStartupBudget {
+		return fmt.Errorf("%w: declared %s, maximum is %s", ErrStartupBudget, startupBudget, MaxStartupBudget)
 	}
 	return nil
 }
 
 func validateProcess(
 	process Process,
-	name string,
 	sidecar bool,
 	names map[string]struct{},
 	ports map[int]struct{},
 	startupBudget *time.Duration,
+	serviceCount *int,
 ) error {
-	if !processNamePattern.MatchString(name) {
-		return fmt.Errorf("%w: process %q has an invalid name", ErrInvalidSpec, name)
+	if !processNamePattern.MatchString(process.Name) {
+		return fmt.Errorf("%w: process %q has an invalid name", ErrInvalidSpec, process.Name)
 	}
-	if _, exists := names[name]; exists {
-		return fmt.Errorf("%w: %s", ErrDuplicateProcess, name)
+	if _, exists := names[process.Name]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateProcess, process.Name)
 	}
-	names[name] = struct{}{}
+	names[process.Name] = struct{}{}
 
 	if len(process.Command) == 0 || !validAbsolutePath(process.Command[0]) {
-		return fmt.Errorf("%w: process %s command must start with a clean absolute path", ErrInvalidSpec, name)
+		return fmt.Errorf("%w: process %s command must start with a clean absolute path", ErrInvalidSpec, process.Name)
 	}
 	for _, argument := range process.Command {
 		if strings.ContainsRune(argument, '\x00') {
-			return fmt.Errorf("%w: process %s command contains NUL", ErrInvalidSpec, name)
+			return fmt.Errorf("%w: process %s command contains NUL", ErrInvalidSpec, process.Name)
 		}
 	}
 	if process.WorkDir != "" && !validAbsolutePathAllowRoot(process.WorkDir) {
-		return fmt.Errorf("%w: process %s workdir must be a clean absolute path", ErrInvalidSpec, name)
+		return fmt.Errorf("%w: process %s workdir must be a clean absolute path", ErrInvalidSpec, process.Name)
 	}
 	if process.User != nil {
 		if sidecar {
 			if !userNamePattern.MatchString(process.User.Name) {
-				return fmt.Errorf("%w: sidecar process %s user name is invalid", ErrInvalidSpec, name)
+				return fmt.Errorf("%w: sidecar process %s user name is invalid", ErrInvalidSpec, process.Name)
 			}
 			if process.User.UID != 0 || process.User.GID != 0 {
-				return fmt.Errorf("%w: sidecar process %s user must use a name only", ErrInvalidSpec, name)
+				return fmt.Errorf("%w: sidecar process %s user must use a name only", ErrInvalidSpec, process.Name)
 			}
 		} else {
 			if process.User.Name != "" {
-				return fmt.Errorf("%w: main process %s user must use numeric UID/GID", ErrInvalidSpec, name)
+				return fmt.Errorf("%w: main process %s user must use numeric UID/GID", ErrInvalidSpec, process.Name)
 			}
 			if process.User.UID == ^uint32(0) || process.User.GID == ^uint32(0) {
-				return fmt.Errorf("%w: process %s user contains the reserved UID/GID value", ErrInvalidSpec, name)
+				return fmt.Errorf("%w: process %s user contains the reserved UID/GID value", ErrInvalidSpec, process.Name)
 			}
 		}
 	}
 	for key, value := range process.Env {
 		if !environmentPattern.MatchString(key) || strings.ContainsRune(value, '\x00') {
-			return fmt.Errorf("%w: process %s has invalid environment variable %q", ErrInvalidSpec, name, key)
+			return fmt.Errorf("%w: process %s has invalid environment variable %q", ErrInvalidSpec, process.Name, key)
 		}
 		if key == SpecEnvironment {
-			return fmt.Errorf("%w: process %s cannot override %s", ErrInvalidSpec, name, SpecEnvironment)
+			return fmt.Errorf("%w: process %s cannot override %s", ErrInvalidSpec, process.Name, SpecEnvironment)
 		}
 	}
 	for _, port := range process.Expose {
 		if port < 1 || port > 65535 {
-			return fmt.Errorf("%w: process %s exposes %d", ErrInvalidSpec, name, port)
+			return fmt.Errorf("%w: process %s exposes %d", ErrInvalidSpec, process.Name, port)
 		}
 		if reservedPort(port) {
 			return fmt.Errorf("%w: %d", ErrReservedPort, port)
@@ -179,19 +207,52 @@ func validateProcess(
 		}
 		ports[port] = struct{}{}
 	}
-	if process.StartupProbe != nil {
-		resolved, err := resolveProbe(*process.StartupProbe)
-		if err != nil {
-			return fmt.Errorf("%w: process %s: %v", ErrInvalidSpec, name, err)
+
+	kind, err := resolveProcessKind(process.Kind)
+	if err != nil {
+		return fmt.Errorf("%w: process %s: %v", ErrInvalidSpec, process.Name, err)
+	}
+	switch kind {
+	case Service:
+		(*serviceCount)++
+		if process.Timeout != 0 {
+			return fmt.Errorf("%w: service process %s cannot set timeout", ErrInvalidSpec, process.Name)
 		}
-		*startupBudget += resolved.ReadyTimeout
+		if process.Probe != nil {
+			resolved, probeErr := resolveProbe(*process.Probe)
+			if probeErr != nil {
+				return fmt.Errorf("%w: process %s: %v", ErrInvalidSpec, process.Name, probeErr)
+			}
+			*startupBudget += resolved.StartupTimeout
+		}
+	case RunToCompletion:
+		if process.Probe != nil {
+			return fmt.Errorf("%w: run-to-completion process %s cannot set a readiness probe", ErrInvalidSpec, process.Name)
+		}
+		if len(process.Expose) != 0 {
+			return fmt.Errorf("%w: run-to-completion process %s cannot expose ports", ErrInvalidSpec, process.Name)
+		}
+		if err := validateCompletionTimeout(process.Timeout); err != nil {
+			return fmt.Errorf("%w: process %s: %v", ErrInvalidSpec, process.Name, err)
+		}
+		*startupBudget += process.Timeout
 	}
 	return nil
 }
 
-func resolveProbe(probe StartupProbe) (StartupProbe, error) {
-	if probe.ReadyTimeout == 0 {
-		probe.ReadyTimeout = DefaultReadyTimeout
+func resolveProcessKind(kind ProcessKind) (ProcessKind, error) {
+	if kind == "" {
+		return Service, nil
+	}
+	if kind != Service && kind != RunToCompletion {
+		return "", fmt.Errorf("process kind %q is invalid", kind)
+	}
+	return kind, nil
+}
+
+func resolveProbe(probe ReadinessProbe) (ReadinessProbe, error) {
+	if probe.StartupTimeout == 0 {
+		probe.StartupTimeout = DefaultStartupTimeout
 	}
 	if probe.Period == 0 {
 		probe.Period = DefaultProbePeriod
@@ -199,28 +260,51 @@ func resolveProbe(probe StartupProbe) (StartupProbe, error) {
 	if probe.Timeout == 0 {
 		probe.Timeout = DefaultProbeTimeout
 	}
+	if probe.FailureThreshold == 0 {
+		probe.FailureThreshold = DefaultFailureThreshold
+	}
+	if probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = DefaultSuccessThreshold
+	}
 	if !validHTTPOriginForm(probe.Path) {
-		return StartupProbe{}, fmt.Errorf("probe path must be an encoded HTTP origin-form target")
+		return ReadinessProbe{}, fmt.Errorf("probe path must be an encoded HTTP origin-form target")
 	}
 	if probe.Port < 1 || probe.Port > 65535 {
-		return StartupProbe{}, fmt.Errorf("probe port is invalid")
+		return ReadinessProbe{}, fmt.Errorf("probe port is invalid")
 	}
 	if probe.Port == ControlPort {
-		return StartupProbe{}, fmt.Errorf("probe port %d is reserved by campd", probe.Port)
+		return ReadinessProbe{}, fmt.Errorf("probe port %d is reserved by campd", probe.Port)
 	}
-	if err := validateProbeDuration("ready timeout", probe.ReadyTimeout, time.Second, AGSReadyTimeout); err != nil {
-		return StartupProbe{}, err
+	if err := validateProbeDuration("startup timeout", probe.StartupTimeout, time.Second, AGSReadyTimeout); err != nil {
+		return ReadinessProbe{}, err
 	}
 	if err := validateProbeDuration("period", probe.Period, 100*time.Millisecond, AGSReadyTimeout); err != nil {
-		return StartupProbe{}, err
+		return ReadinessProbe{}, err
 	}
 	if err := validateProbeDuration("timeout", probe.Timeout, 100*time.Millisecond, AGSReadyTimeout); err != nil {
-		return StartupProbe{}, err
+		return ReadinessProbe{}, err
 	}
-	if probe.Timeout > probe.ReadyTimeout {
-		return StartupProbe{}, fmt.Errorf("probe timeout exceeds ready timeout")
+	if probe.Timeout > probe.StartupTimeout {
+		return ReadinessProbe{}, fmt.Errorf("probe timeout exceeds startup timeout")
+	}
+	if probe.FailureThreshold < 1 {
+		return ReadinessProbe{}, fmt.Errorf("probe failure threshold must be positive")
+	}
+	if probe.SuccessThreshold < 1 {
+		return ReadinessProbe{}, fmt.Errorf("probe success threshold must be positive")
+	}
+	if uint64(probe.FailureThreshold) > uint64(^uint32(0)) ||
+		uint64(probe.SuccessThreshold) > uint64(^uint32(0)) {
+		return ReadinessProbe{}, fmt.Errorf("probe threshold exceeds the runtime limit")
 	}
 	return probe, nil
+}
+
+func validateCompletionTimeout(timeout time.Duration) error {
+	if timeout < 100*time.Millisecond || timeout > AGSReadyTimeout || timeout%time.Millisecond != 0 {
+		return fmt.Errorf("completion timeout must be a whole millisecond in [%s, %s]", 100*time.Millisecond, AGSReadyTimeout)
+	}
+	return nil
 }
 
 func validHTTPOriginForm(value string) bool {

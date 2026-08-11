@@ -52,9 +52,28 @@ tasks:
     cmds:
       - bash ./scripts/test-sandrun-linux.sh
 
+  test:campd-linux:
+    desc: 在 Docker 中执行 campd 进程、Job 和持续 Readiness 集成测试
+    cmds:
+      - bash ./scripts/test-campd-linux.sh
+
   test:stack-linux:
     desc: 联合验证 root/nonroot campd、sandrun、FastAPI 和 Egress
     deps: [images:build]
     cmds:
       - SCENARIO=root bash ./scripts/test-stack-linux.sh
       - SCENARIO=nonroot bash ./scripts/test-stack-linux.sh
+
+  e2e:build:
+    desc: 构建 Linux/amd64 E2E Agent、测试 Runtime 和夹具镜像
+    deps: [build]
+    cmds:
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o out/sandcamp-e2e-agent ./test/e2e/cmd/agent
+      - docker build --platform linux/amd64 -t sandcamp-e2e-agent:alpine-local -f test/e2e/images/agent-alpine/Dockerfile .
+      - docker build --platform linux/amd64 -t sandcamp-e2e-agent:glibc-local -f test/e2e/images/agent-glibc/Dockerfile .
+      - docker build --platform linux/amd64 -t sandcamp-runtime:e2e-local -f test/e2e/images/runtime/Dockerfile .
+
+  e2e:list:
+    desc: 列出云端回归场景（不访问云 API）
+    cmds:
+      - go run ./test/e2e/cmd/runner list

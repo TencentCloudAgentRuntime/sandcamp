@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TARGET: x86_64-unknown-linux-musl
+  RUST_TOOLCHAIN: 1.92.0
+
+jobs:
+  quality:
+    name: Unit tests and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.24.x
+          cache: true
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --component clippy,rustfmt \
+            --target "$RUST_TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l $(git ls-files '*.go'))"
+          cargo fmt --all --check
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Run Rust lint
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          RUSTFLAGS='-C linker=rust-lld' \
+            cargo clippy --workspace --all-targets \
+            --target "$RUST_TARGET" -- -D warnings
+
+  linux-integration:
+    name: Runtime image and Linux integration
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.24.x
+          cache: true
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --target "$RUST_TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Build static runtime binaries
+        env:
+          RUSTFLAGS: -C linker=rust-lld
+        run: |
+          mkdir -p out
+          cargo build --workspace --release --target "$RUST_TARGET"
+          install -m 0755 "target/$RUST_TARGET/release/campd" out/campd
+          install -m 0755 "target/$RUST_TARGET/release/sandrun" out/sandrun
+
+      - name: Build Linux images
+        run: |
+          docker build --platform linux/amd64 \
+            -t sandcamp-fastapi-proxy:local \
+            test/image-volume/fastapi-proxy
+          docker build --platform linux/amd64 \
+            -t sandcamp-egress:local \
+            test/image-volume/egress
+          docker build --platform linux/amd64 \
+            -t sandcamp-runtime:local \
+            -f images/runtime/Dockerfile .
+          docker build --platform linux/amd64 --target root \
+            -t sandcamp-validation-main:root-local \
+            validation/fixtures/main
+          docker build --platform linux/amd64 --target nonroot \
+            -t sandcamp-validation-main:nonroot-local \
+            validation/fixtures/main
+
+      - name: Test sandrun on Linux
+        env:
+          SANDRUN_BIN: ${{ github.workspace }}/out/sandrun
+        run: bash ./scripts/test-sandrun-linux.sh
+
+      - name: Test the root stack
+        env:
+          SCENARIO: root
+        run: bash ./scripts/test-stack-linux.sh
+
+      - name: Test the non-root stack
+        env:
+          SCENARIO: nonroot
+        run: bash ./scripts/test-stack-linux.sh

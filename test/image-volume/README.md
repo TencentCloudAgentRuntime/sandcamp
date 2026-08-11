@@ -16,8 +16,8 @@ Capabilities。
 将镜像挂载到 `/mnt/sandcamp` 后，可以通过 `/mnt/sandcamp/bin/campd` 和
 `/mnt/sandcamp/bin/sandrun` 使用这两个二进制，无需修改主镜像。
 
-campd 不依赖 sandrun 的 Crate，也不解析其命令行；测试仍将两个二进制作为同一
-Runtime 版本组合构建和验证。
+campd 不依赖 sandrun 的 Crate，但会从结构化运行时声明构造 sandrun 命令行；测试
+将两个二进制作为同一 Runtime 版本组合构建和验证。
 
 ## FastAPI Proxy
 
