@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*-beta.*"
   pull_request:
     branches:
       - main
@@ -38,6 +40,9 @@ jobs:
         with:
           go-version: 1.24.x
           cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/cookbook/go.sum
 
       - name: Set up Rust
         run: |
@@ -53,7 +58,9 @@ jobs:
           cargo fmt --all --check
 
       - name: Run Go tests
-        run: go test ./...
+        run: |
+          go test ./...
+          go -C examples/cookbook test ./...
 
       - name: Run Rust tests
         run: cargo test --workspace
@@ -140,8 +147,9 @@ jobs:
       - name: Upload tested runtime binaries
         if: >-
           github.repository == 'csjgg/sandcamp' &&
-          github.ref == 'refs/heads/main' &&
-          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          github.event_name == 'push' &&
+          startsWith(github.ref, 'refs/tags/v') &&
+          contains(github.ref, '-beta.')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandcamp-runtime-linux-amd64
@@ -157,8 +165,9 @@ jobs:
     needs: linux-integration
     if: >-
       github.repository == 'csjgg/sandcamp' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      contains(github.ref, '-beta.')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -195,6 +204,7 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=beta
+            type=ref,event=tag
             type=sha,format=long,prefix=sha-
           labels: |
             org.opencontainers.image.title=Sandcamp runtime bundle
@@ -219,6 +229,8 @@ jobs:
         env:
           IMAGE: ghcr.io/csjgg/sandcamp-runtime
           DIGEST: ${{ steps.publish.outputs.digest }}
+          VERSION: ${{ github.ref_name }}
         run: |
-          printf '### Runtime beta published\n\n- `%s:beta`\n- `%s:sha-%s`\n- Digest: `%s`\n' \
-            "$IMAGE" "$IMAGE" "$GITHUB_SHA" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Runtime beta published\n\n- `%s:beta`\n- `%s:%s`\n- `%s:sha-%s`\n- Digest: `%s`\n' \
+            "$IMAGE" "$IMAGE" "$VERSION" "$IMAGE" "$GITHUB_SHA" "$DIGEST" \
+            >> "$GITHUB_STEP_SUMMARY"

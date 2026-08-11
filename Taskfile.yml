@@ -8,6 +8,7 @@ tasks:
     desc: 运行跨平台单元测试
     cmds:
       - go test ./...
+      - go -C examples/cookbook test ./...
       - cargo test --workspace
 
   build:
@@ -24,6 +25,7 @@ tasks:
     desc: 格式化 Go 和 Rust 源码
     cmds:
       - go fmt ./...
+      - go -C examples/cookbook fmt ./...
       - cargo fmt --all
 
   lint:

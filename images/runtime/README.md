@@ -5,16 +5,18 @@
 
 ## Beta 构建产物
 
-`main` 分支的完整 CI 通过后，会把经过 Linux 集成测试的同一份 Runtime 二进制
-打包并保存到 GitHub Container Registry：
+推送 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会执行完整回归，并把通过
+测试的同一份 Runtime 二进制打包保存到 GitHub Container Registry：
 
 ```text
 ghcr.io/csjgg/sandcamp-runtime:beta
+ghcr.io/csjgg/sandcamp-runtime:v0.1.0-beta.1
 ghcr.io/csjgg/sandcamp-runtime:sha-<完整 Git Commit>
 ```
 
-`beta` 会随每次成功构建移动，适合试用。需要固定运行内容时，使用 `sha-...`
-标签或镜像 Digest。当前只构建 `linux/amd64`，不会发布 `latest`。
+`beta` 只会随成功的 beta tag 构建移动。普通 `main` push、Pull Request 和手动 CI
+只执行验证，不发布镜像。需要固定运行内容时，使用版本标签、`sha-...` 标签或镜像
+Digest。当前只构建 `linux/amd64`，不会发布 `latest`。
 
 GHCR 是构建产物的分发来源，不是 AGS Image Volume 当前支持的 Registry。AGS 的
 Runtime/Sidecar Image Volume 只支持腾讯云 CCR（`personal`）和 TCR

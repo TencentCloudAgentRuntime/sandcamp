@@ -10,10 +10,10 @@
 //
 //	cp examples/cookbook/.env.example examples/cookbook/.env
 //	# 编辑 examples/cookbook/.env
-//	go run ./examples/cookbook
+//	go -C examples/cookbook run .
 //
-// 程序自动读取 examples/cookbook/.env；已经存在的系统环境变量优先。真实 .env 已被
-// Git 忽略，不要把 Secret ID、Secret Key 或 Role ARN 提交到仓库。
+// Cookbook 是独立 Go 模块，程序从自身目录读取 .env；已经存在的系统环境变量优先。
+// 真实 .env 已被 Git 忽略，不要把 Secret ID、Secret Key 或 Role ARN 提交到仓库。
 //
 // 程序会实际创建 Tool 并启动 Instance，只输出资源 ID，不等待 Instance 进入 RUNNING，
 // 也不自动清理。验证完成后需要显式停止 Instance 并删除 Tool。
@@ -50,8 +50,8 @@ const (
 )
 
 func main() {
-	if err := godotenv.Load("examples/cookbook/.env"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Fatalf("load examples/cookbook/.env: %v", err)
+	if err := godotenv.Load(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Fatalf("load .env: %v", err)
 	}
 
 	required := []string{

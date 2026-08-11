@@ -9,11 +9,11 @@ Sandcamp 是一个用于 AGS 的进程编排 SDK。它让一个沙箱同时运�
 主镜像不需要包含 `campd` 或 `sandrun`。这两个静态二进制由单独的 Runtime Image
 Volume 提供。
 
-CI 将 `linux/amd64` 预发布构建产物保存为
-`ghcr.io/csjgg/sandcamp-runtime:beta`。AGS Image Volume 当前不能直接从 GHCR
-拉取；使用前必须把该 Runtime 镜像同步到调用方自己的腾讯云 CCR 或 TCR。`beta` 是
-可变标签；需要固定内容时，先选择 `sha-<完整 Git Commit>` 或 Digest，再同步到目标
-Registry。
+创建 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会先执行完整回归，再把
+`linux/amd64` 预发布构建产物保存为 `ghcr.io/csjgg/sandcamp-runtime:beta` 和对应
+版本标签。普通 `main` push 与 Pull Request 只执行测试，不发布镜像。AGS Image Volume
+当前不能直接从 GHCR 拉取；使用前必须把该 Runtime 镜像同步到调用方自己的腾讯云
+CCR 或 TCR。需要固定内容时，优先同步版本标签、`sha-<完整 Git Commit>` 或 Digest。
 
 [完整 Cookbook](examples/cookbook/main.go) ·
 [API 参考](docs/api-reference.md) ·
@@ -134,10 +134,11 @@ AGS custom Tool 要求默认 `Command` 和 `Probe`，所以 Tool 与 Instance �
 ```bash
 cp examples/cookbook/.env.example examples/cookbook/.env
 # 编辑 examples/cookbook/.env
-go run ./examples/cookbook
+go -C examples/cookbook run .
 ```
 
-真实 `.env` 已被 Git 忽略；进程已有的环境变量优先于文件中的同名值。
+Cookbook 使用独立 `go.mod` 管理示例依赖。真实 `.env` 已被 Git 忽略；进程已有的环境
+变量优先于文件中的同名值。
 
 ## 运行原理
 
