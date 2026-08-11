@@ -9,6 +9,10 @@ Sandcamp 是一个用于 AGS 的进程编排 SDK。它让一个沙箱同时运�
 主镜像不需要包含 `campd` 或 `sandrun`。这两个静态二进制由单独的 Runtime Image
 Volume 提供。
 
+当前预发布 Runtime Image 为 `ghcr.io/csjgg/sandcamp-runtime:beta`，仅支持
+`linux/amd64`。`beta` 是可变标签；需要固定内容时使用
+`ghcr.io/csjgg/sandcamp-runtime:sha-<完整 Git Commit>` 或镜像 Digest。
+
 [完整 Cookbook](examples/cookbook/main.go) ·
 [API 参考](docs/api-reference.md) ·
 [技术方案](docs/design.md) ·
