@@ -17,6 +17,11 @@ Readiness 只支持共享 Loopback 上的 HTTP GET。首次成功负责启动 Ga
 Main 进程会继承 campd 从主镜像和 AGS 获得的环境，再应用自己的 `Process.Env`。
 Sidecar 会先清空继承环境，只注入显式声明的 `Process.Env`，避免主容器凭证泄漏。
 
+Main 和 Sidecar 都支持镜像用户名或显式数字 UID/GID。Main 名称由 campd 在任何
+声明启动前从主镜像 `/etc/passwd` 解析并缓存；Sidecar 名称交给 sandrun 从自己的
+immutable lower RootFS 解析。非 root 身份会清空附加组与 Capabilities，并启用
+`no_new_privs`；显式 root 保留 root Capabilities。
+
 在仓库根目录构建静态 Linux/amd64 二进制：
 
 ```bash

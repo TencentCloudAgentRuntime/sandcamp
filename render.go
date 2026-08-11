@@ -12,7 +12,7 @@ import (
 const (
 	defaultCampdPath         = "/mnt/sandcamp/bin/campd"
 	defaultOverlayDevicePath = "/dev/vda"
-	runtimeSpecVersion       = 2
+	runtimeSpecVersion       = 3
 )
 
 // RenderStart converts process declarations into the runtime declaration read
@@ -98,24 +98,21 @@ type runtimeProcess struct {
 
 type runtimeSidecar struct {
 	runtimeProcess
-	RootFS         string            `json:"rootfs"`
-	OverlayDevice  string            `json:"overlay_device,omitempty"`
-	StandardMounts bool              `json:"standard_mounts"`
-	User           *runtimeNamedUser `json:"user,omitempty"`
+	RootFS         string       `json:"rootfs"`
+	OverlayDevice  string       `json:"overlay_device,omitempty"`
+	StandardMounts bool         `json:"standard_mounts"`
+	User           *runtimeUser `json:"user,omitempty"`
 }
 
 type runtimeMain struct {
 	runtimeProcess
-	User *runtimeNumericUser `json:"user,omitempty"`
+	User *runtimeUser `json:"user,omitempty"`
 }
 
-type runtimeNamedUser struct {
-	Name string `json:"name"`
-}
-
-type runtimeNumericUser struct {
-	UID uint32 `json:"uid"`
-	GID uint32 `json:"gid"`
+type runtimeUser struct {
+	Name *string `json:"name,omitempty"`
+	UID  *uint32 `json:"uid,omitempty"`
+	GID  *uint32 `json:"gid,omitempty"`
 }
 
 type runtimeProbe struct {
@@ -158,7 +155,7 @@ func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
 		StandardMounts: true,
 	}
 	if process.User != nil {
-		result.User = &runtimeNamedUser{Name: process.User.Name}
+		result.User = toRuntimeUser(*process.User)
 	}
 	return result
 }
@@ -166,12 +163,18 @@ func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
 func toRuntimeMain(process Process) runtimeMain {
 	result := runtimeMain{runtimeProcess: toRuntimeProcess(process)}
 	if process.User != nil {
-		result.User = &runtimeNumericUser{
-			UID: process.User.UID,
-			GID: process.User.GID,
-		}
+		result.User = toRuntimeUser(*process.User)
 	}
 	return result
+}
+
+func toRuntimeUser(user ProcessUser) *runtimeUser {
+	if user.Name != "" {
+		name := user.Name
+		return &runtimeUser{Name: &name}
+	}
+	uid, gid := user.UID, user.GID
+	return &runtimeUser{UID: &uid, GID: &gid}
 }
 
 func toRuntimeProcess(process Process) runtimeProcess {

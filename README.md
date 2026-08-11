@@ -185,22 +185,26 @@ Sidecar Image Volume 是 immutable OverlayFS lowerdir。`sandrun` 使用 AGS 提
 设备承载独立 upperdir/workdir，完成挂载后执行 `pivot_root`；普通镜像路径具有
 Copy-on-Write 语义，而 lowerdir 不变。
 
-Main 使用数字身份：
+Main 和 Sidecar 使用同一个身份模型。可以直接指定数字 UID/GID：
 
 ```go
 User: &sandcamp.ProcessUser{UID: 65532, GID: 65532}
 ```
 
-Sidecar 使用镜像内用户名：
+也可以使用进程所属镜像内的用户名：
 
 ```go
 User: &sandcamp.ProcessUser{Name: "app"}
 ```
 
-命名用户必须存在于 Sidecar lower RootFS 的 `/etc/passwd`。sandrun 在挂载、
-`pivot_root` 和 WorkDir 完成后清空附加组与 Capabilities、切换 UID/GID，并设置
-`no_new_privs`。用户缺失或 passwd 非法时直接失败，不回退 root。它不会查询
-NSS/LDAP，也不会自动设置 `HOME`、`USER` 或 `LOGNAME`。
+Main 名称从主镜像 `/etc/passwd` 解析；Sidecar 名称从对应 Sidecar immutable lower
+RootFS 的 `/etc/passwd` 解析。同一个名称可以在不同镜像中得到不同 UID/GID。数字
+身份不查询 passwd，直接应用声明的 UID/GID。
+
+`User=nil` 时继承运行时身份，通常为 root。显式选择非 root 身份时会清空附加组与
+Capabilities，并设置 `no_new_privs`；显式选择 `0:0` 或名称 `root` 时保留 root
+Capabilities。用户缺失或 passwd 非法时直接失败，不回退 root。Sandcamp 不查询
+NSS/LDAP、解析附加组，也不自动设置 `HOME`、`USER` 或 `LOGNAME`。
 
 Image Volume 不会自动应用 OCI `Entrypoint`、`Cmd`、`Env`、`WorkingDir`、`User` 或
 健康检查；Sidecar 需要显式声明这些运行信息。

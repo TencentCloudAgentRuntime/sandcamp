@@ -4,7 +4,8 @@
 AGS 资源。
 
 GitHub Actions 在 Pull Request、`main` 更新和手动触发时执行格式、Go/Rust 测试、
-Clippy、静态 Linux 构建与 Docker 整栈回归。当前 CI 不创建 Release，也不推送镜像。
+Clippy、静态 Linux 构建与 Docker 整栈回归。符合 `v*-beta.*` 的 Tag 在相同门禁通过后
+额外发布 Runtime 镜像；普通分支构建不推送镜像。
 
 ## Go SDK
 
@@ -19,12 +20,12 @@ go vet ./...
 - Sidecar-only、单/多 Main、Sidecars→Main 顺序；
 - Service 默认 Kind、RunToCompletion Job 与非法生命周期组合；
 - Readiness 默认值、阈值、持续时间和 25 秒启动预算；
-- Main 数字用户、Sidecar 命名用户与错误组合；
+- Main/Sidecar 的命名、数字、显式 root 身份与错误组合；
 - Command、Env、WorkDir、Expose、保留端口和 120 KiB 编码上限；
-- runtime declaration v2 的 Main/Sidecar 类型分离；
+- runtime declaration v3 的统一 User 形状与显式零值编码；
 - Sidecar RootFS 注入、Main 隐式 RootFS 和 AGS Ports 转换；
 - Tool 默认配置与 Instance 配置组合；
-- E2E 49 个场景的 Spec 全量渲染。
+- E2E 53 个场景的 Spec 全量渲染。
 
 ## Rust
 
@@ -38,11 +39,11 @@ RUSTFLAGS='-C linker=rust-lld' \
 
 campd/sandrun 单元测试覆盖：
 
-- runtime declaration v2 严格反序列化与旧版本拒绝；
+- runtime declaration v3 严格反序列化、v2 兼容与更旧版本拒绝；
 - Main/Sidecar 字段、Kind、用户、Bind、路径、环境和预算校验；
 - campd 构造 sandrun argv；
 - Readiness 成功/失败阈值与恢复；
-- sandrun 参数、Bind/tmpfs 目标、WorkDir 和用户名校验。
+- sandrun 参数、Bind/tmpfs 目标、WorkDir、用户名和数字身份校验。
 
 Linux 上额外执行 5 个 campd 进程集成测试：
 
@@ -69,7 +70,9 @@ task test:stack-linux
 - `pivot_root` 后 WorkDir；
 - glibc、musl 与静态二进制；
 - Overlay Identity 锁、并发拒绝和重启复用；
-- 命名用户 UID/GID、空附加组、四组零 Capability、`NoNewPrivs=1`；
+- 命名与数字非 root 用户的 UID/GID、空附加组、四组零 Capability、
+  `NoNewPrivs=1`；
+- 无 passwd 数字身份与显式 root 保留 Capability；
 - 用户缺失严格失败；
 - lower 不变、exec 信号链路、FastAPI 与 Egress 完整 RootFS。
 
@@ -85,19 +88,23 @@ task test:stack-linux
 
 ## AGS 运行态回归
 
-[`test/e2e`](../test/e2e/README.md) 是显式运行的云端测试。当前目录包含 49 个场景：
+[`test/e2e`](../test/e2e/README.md) 是显式运行的云端测试。当前目录包含 53 个场景：
 
 | 范围 | 数量 | 主要内容 |
 | --- | ---: | --- |
 | 启动、组合与 Readiness | 9 | Sidecar-only、多 Main、两类 Init Job、无 Probe Service、持续降级/恢复 |
-| 身份与权限 | 3 | Main 数字用户、Alpine/glibc Sidecar 命名用户 |
+| 身份与权限 | 6 | Main/Sidecar 命名与数字身份、显式 root 权限语义 |
 | 文件系统、进程与网络 | 10 | Overlay、argv/env/workdir、双向 HTTP、UDP、公网、Fanout、子进程拓扑、Netfilter 写入 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、setsid、共享 Probe 端点 |
 | 真实镜像、网络策略与额外挂载 | 14 | FastAPI、Nginx Main、Egress 多策略与规则生命周期、envd Main Service |
-| 预期拒绝 | 7 | 用户/命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |
+| 预期拒绝 | 8 | Main/Sidecar 用户缺失、命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |
 
 其中 3 个 Egress 负向场景归入网络策略范围，分别验证非法策略、控制端口冲突和
 non-root 权限不足，因此表内各行与场景总数不存在重复计数。
+
+身份场景会在 AGS 中使用不存在于 passwd 的数字 UID/GID，验证 Sidecar 不做名称
+映射；Main 命名场景先由 Init Job 改写 `/etc/passwd`，验证 campd 使用启动前缓存；
+显式 root 场景同时检查 Main 与 Sidecar 的有效 Capability 和 `NoNewPrivs=0`。
 
 测试专用 Runtime 额外包含 root Observer，通过 `/proc`、主动 HTTP/HTTPS/UDP 请求和
 启动前/运行中 Netfilter 快照收集有界证据；

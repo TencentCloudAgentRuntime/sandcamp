@@ -1,4 +1,4 @@
-use crate::{Bind, Config, RuntimeError, validate_target_paths};
+use crate::{Bind, Config, ProcessUser, RuntimeError, validate_target_paths};
 use sha2::{Digest, Sha256};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -66,11 +66,22 @@ struct CapabilityData {
 
 pub(crate) fn run(config: Config) -> Result<(), RuntimeError> {
     let lower = prepare_rootfs(&config.rootfs)?;
-    let identity = config
-        .user
-        .as_deref()
-        .map(|user| resolve_user(&lower, user))
-        .transpose()?;
+    let identity = match &config.user {
+        Some(ProcessUser::Named(user)) => Some(resolve_user(&lower, user)?),
+        Some(ProcessUser::Numeric { uid, gid }) => {
+            if *uid == u32::MAX || *gid == u32::MAX {
+                return Err(RuntimeError::InvalidNumericUser {
+                    uid: *uid,
+                    gid: *gid,
+                });
+            }
+            Some(UserIdentity {
+                uid: *uid,
+                gid: *gid,
+            })
+        }
+        None => None,
+    };
 
     unshare_mount_namespace()?;
     make_mounts_private()?;
@@ -88,7 +99,7 @@ pub(crate) fn run(config: Config) -> Result<(), RuntimeError> {
     enter_rootfs(rootfs)?;
     change_directory(&config.workdir)?;
     if let Some(identity) = identity {
-        drop_privileges(identity)?;
+        apply_identity(identity)?;
     }
 
     let mut command = Command::new(&config.command[0]);
@@ -189,16 +200,18 @@ fn parse_passwd_id(value: &str, line: usize, reason: &'static str) -> Result<u32
     Ok(id)
 }
 
-fn drop_privileges(identity: UserIdentity) -> Result<(), RuntimeError> {
-    if unsafe {
-        libc::prctl(
-            libc::PR_CAP_AMBIENT,
-            libc::PR_CAP_AMBIENT_CLEAR_ALL,
-            0,
-            0,
-            0,
-        )
-    } != 0
+fn apply_identity(identity: UserIdentity) -> Result<(), RuntimeError> {
+    let non_root = identity.uid != 0;
+    if non_root
+        && unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            )
+        } != 0
     {
         return Err(RuntimeError::operation(
             "ambient_capabilities_clear_failed",
@@ -227,28 +240,30 @@ fn drop_privileges(identity: UserIdentity) -> Result<(), RuntimeError> {
             io::Error::last_os_error(),
         ));
     }
-    let mut header = CapabilityHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let mut data = [CapabilityData {
-        effective: 0,
-        permitted: 0,
-        inheritable: 0,
-    }; 2];
-    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_mut_ptr()) } != 0 {
-        return Err(RuntimeError::operation(
-            "capabilities_clear_failed",
-            None,
-            io::Error::last_os_error(),
-        ));
-    }
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(RuntimeError::operation(
-            "no_new_privileges_failed",
-            None,
-            io::Error::last_os_error(),
-        ));
+    if non_root {
+        let mut header = CapabilityHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_mut_ptr()) } != 0 {
+            return Err(RuntimeError::operation(
+                "capabilities_clear_failed",
+                None,
+                io::Error::last_os_error(),
+            ));
+        }
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            return Err(RuntimeError::operation(
+                "no_new_privileges_failed",
+                None,
+                io::Error::last_os_error(),
+            ));
+        }
     }
     if unsafe { libc::getuid() } != identity.uid
         || unsafe { libc::geteuid() } != identity.uid

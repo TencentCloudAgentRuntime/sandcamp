@@ -6,9 +6,9 @@
 
 Mount Namespace 和 `pivot_root` 能让进程从指定根文件系统解析可执行文件、
 Dynamic Loader、动态库和绝对路径。它们只保证依赖正确，不是安全隔离边界；
-Network/PID Namespace、cgroup 和文件描述符仍然继承自沙箱。省略 `--user` 时进程
-身份和 Capabilities 也保持继承；指定命名用户时，sandrun 会显式降权并清空
-Capabilities。
+Network/PID Namespace、cgroup 和文件描述符仍然继承自沙箱。省略身份参数时进程
+身份和 Capabilities 也保持继承；指定命名或数字非 root 用户时，sandrun 会显式
+降权并清空 Capabilities。显式 root 仍保留 root Capabilities。
 
 ## Runtime Bundle
 

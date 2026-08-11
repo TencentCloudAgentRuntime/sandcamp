@@ -43,25 +43,22 @@ type runtimeProcess struct {
 
 type runtimeSidecar struct {
 	runtimeProcess
-	RootFS         string            `json:"rootfs"`
-	OverlayDevice  string            `json:"overlay_device,omitempty"`
-	StandardMounts bool              `json:"standard_mounts"`
-	Binds          []Bind            `json:"binds,omitempty"`
-	User           *runtimeNamedUser `json:"user,omitempty"`
+	RootFS         string       `json:"rootfs"`
+	OverlayDevice  string       `json:"overlay_device,omitempty"`
+	StandardMounts bool         `json:"standard_mounts"`
+	Binds          []Bind       `json:"binds,omitempty"`
+	User           *runtimeUser `json:"user,omitempty"`
 }
 
 type runtimeMain struct {
 	runtimeProcess
-	User *runtimeNumericUser `json:"user,omitempty"`
+	User *runtimeUser `json:"user,omitempty"`
 }
 
-type runtimeNamedUser struct {
-	Name string `json:"name"`
-}
-
-type runtimeNumericUser struct {
-	UID uint32 `json:"uid"`
-	GID uint32 `json:"gid"`
+type runtimeUser struct {
+	Name *string `json:"name,omitempty"`
+	UID  *uint32 `json:"uid,omitempty"`
+	GID  *uint32 `json:"gid,omitempty"`
 }
 
 type runtimeProbe struct {
@@ -136,7 +133,7 @@ func Render(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (*ags.Custom
 
 func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, error) {
 	runtime := runtimeSpec{
-		Version:  2,
+		Version:  3,
 		Sidecars: make([]runtimeSidecar, 0, len(spec.Sidecars)),
 		Main:     make([]runtimeMain, 0, len(spec.Main)),
 	}
@@ -150,14 +147,14 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 			Binds:          append([]Bind(nil), configured.Binds...),
 		}
 		if process.User != nil {
-			rendered.User = &runtimeNamedUser{Name: process.User.Name}
+			rendered.User = toRuntimeUser(*process.User)
 		}
 		runtime.Sidecars = append(runtime.Sidecars, rendered)
 	}
 	for _, process := range spec.Main {
 		rendered := runtimeMain{runtimeProcess: toRuntimeProcess(process)}
 		if process.User != nil {
-			rendered.User = &runtimeNumericUser{UID: process.User.UID, GID: process.User.GID}
+			rendered.User = toRuntimeUser(*process.User)
 		}
 		runtime.Main = append(runtime.Main, rendered)
 	}
@@ -166,6 +163,15 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 		return "", fmt.Errorf("encode test runtime declaration: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(encoded), nil
+}
+
+func toRuntimeUser(user sandcamp.ProcessUser) *runtimeUser {
+	if user.Name != "" {
+		name := user.Name
+		return &runtimeUser{Name: &name}
+	}
+	uid, gid := user.UID, user.GID
+	return &runtimeUser{UID: &uid, GID: &gid}
 }
 
 func toRuntimeProcess(process sandcamp.Process) runtimeProcess {

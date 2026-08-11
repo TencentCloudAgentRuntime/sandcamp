@@ -6,7 +6,8 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Component, Path};
 
-const RUNTIME_SPEC_VERSION: u8 = 2;
+const LEGACY_RUNTIME_SPEC_VERSION: u8 = 2;
+const RUNTIME_SPEC_VERSION: u8 = 3;
 const MAX_ENCODED_BYTES: usize = 120 * 1024;
 const AGS_READY_TIMEOUT_MS: u64 = 30_000;
 const MAX_STARTUP_BUDGET_MS: u64 = 25_000;
@@ -46,7 +47,7 @@ pub struct SidecarProcess {
     #[serde(default)]
     pub workdir: String,
     #[serde(default)]
-    pub user: Option<NamedUser>,
+    pub user: Option<ProcessUser>,
     #[serde(default)]
     pub readiness_probe: Option<Probe>,
     #[serde(default)]
@@ -64,7 +65,7 @@ pub struct MainProcess {
     #[serde(default)]
     pub workdir: String,
     #[serde(default)]
-    pub user: Option<NumericUser>,
+    pub user: Option<ProcessUser>,
     #[serde(default)]
     pub readiness_probe: Option<Probe>,
     #[serde(default)]
@@ -82,6 +83,13 @@ pub struct NamedUser {
 pub struct NumericUser {
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum ProcessUser {
+    Named(NamedUser),
+    Numeric(NumericUser),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -138,7 +146,7 @@ pub fn decode(value: &str) -> Result<Spec, SpecError> {
 }
 
 pub fn validate(spec: &Spec) -> Result<(), SpecError> {
-    if spec.version != RUNTIME_SPEC_VERSION {
+    if spec.version != LEGACY_RUNTIME_SPEC_VERSION && spec.version != RUNTIME_SPEC_VERSION {
         return Err(SpecError::new(format!(
             "unsupported declaration version {}",
             spec.version
@@ -180,13 +188,8 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
                 process.name
             )));
         }
-        if let Some(user) = &process.user
-            && !valid_user_name(&user.name)
-        {
-            return Err(SpecError::new(format!(
-                "sidecar {} user name is invalid",
-                process.name
-            )));
+        if let Some(user) = &process.user {
+            validate_user(&process.name, user)?;
         }
         let mut bind_targets = HashSet::with_capacity(process.binds.len());
         for bind in &process.binds {
@@ -218,13 +221,8 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
             &mut startup_budget_ms,
             &mut service_count,
         )?;
-        if let Some(user) = process.user
-            && (user.uid == u32::MAX || user.gid == u32::MAX)
-        {
-            return Err(SpecError::new(format!(
-                "main process {} user contains the reserved UID/GID value",
-                process.name
-            )));
+        if let Some(user) = &process.user {
+            validate_user(&process.name, user)?;
         }
     }
 
@@ -239,6 +237,20 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
         )));
     }
     Ok(())
+}
+
+fn validate_user(process_name: &str, user: &ProcessUser) -> Result<(), SpecError> {
+    match user {
+        ProcessUser::Named(user) if !valid_user_name(&user.name) => Err(SpecError::new(format!(
+            "process {process_name} user name is invalid"
+        ))),
+        ProcessUser::Numeric(user) if user.uid == u32::MAX || user.gid == u32::MAX => {
+            Err(SpecError::new(format!(
+                "process {process_name} user contains the reserved UID/GID value"
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -455,7 +467,7 @@ mod tests {
 
     fn valid_spec() -> Spec {
         Spec {
-            version: 2,
+            version: RUNTIME_SPEC_VERSION,
             sidecars: vec![SidecarProcess {
                 name: "proxy".into(),
                 kind: ProcessKind::Service,
@@ -466,7 +478,7 @@ mod tests {
                 command: vec!["/bin/proxy".into()],
                 env: BTreeMap::new(),
                 workdir: String::new(),
-                user: Some(NamedUser { name: "app".into() }),
+                user: Some(ProcessUser::Named(NamedUser { name: "app".into() })),
                 readiness_probe: Some(probe(9200, 10_000)),
                 completion_timeout_ms: None,
             }],
@@ -487,10 +499,10 @@ mod tests {
                     command: vec!["/app/server".into()],
                     env: BTreeMap::new(),
                     workdir: "/app".into(),
-                    user: Some(NumericUser {
+                    user: Some(ProcessUser::Numeric(NumericUser {
                         uid: 65_532,
                         gid: 65_532,
-                    }),
+                    })),
                     readiness_probe: None,
                     completion_timeout_ms: None,
                 },
@@ -501,6 +513,21 @@ mod tests {
     #[test]
     fn accepts_grouped_runtime_contract() {
         assert_eq!(validate(&valid_spec()), Ok(()));
+
+        let mut legacy = valid_spec();
+        legacy.version = LEGACY_RUNTIME_SPEC_VERSION;
+        assert_eq!(validate(&legacy), Ok(()));
+    }
+
+    #[test]
+    fn accepts_both_user_forms_for_main_and_sidecars() {
+        let mut spec = valid_spec();
+        spec.sidecars[0].user = Some(ProcessUser::Numeric(NumericUser {
+            uid: 65_532,
+            gid: 65_532,
+        }));
+        spec.main[1].user = Some(ProcessUser::Named(NamedUser { name: "app".into() }));
+        assert_eq!(validate(&spec), Ok(()));
     }
 
     #[test]
@@ -636,9 +663,9 @@ mod tests {
         );
 
         let mut spec = valid_spec();
-        spec.sidecars[0].user = Some(NamedUser {
+        spec.sidecars[0].user = Some(ProcessUser::Named(NamedUser {
             name: "../app".into(),
-        });
+        }));
         assert!(
             validate(&spec)
                 .unwrap_err()
@@ -647,10 +674,10 @@ mod tests {
         );
 
         let mut spec = valid_spec();
-        spec.main[1].user = Some(NumericUser {
+        spec.main[1].user = Some(ProcessUser::Numeric(NumericUser {
             uid: u32::MAX,
             gid: 65_532,
-        });
+        }));
         assert!(
             validate(&spec)
                 .unwrap_err()

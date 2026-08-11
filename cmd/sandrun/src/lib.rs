@@ -17,6 +17,8 @@ Options:
   --overlay-id NAME      Stable writable-layer identity (required with device)
   --workdir PATH         Absolute working directory inside rootfs (default: /)
   --user NAME            User from the Sidecar rootfs /etc/passwd
+  --uid UID              Explicit numeric user ID (requires --gid)
+  --gid GID              Explicit numeric primary group ID (requires --uid)
   --standard-mounts      Add proc, dev, read-only sys/DNS, tmpfs /tmp and /run
   --bind SOURCE TARGET   Bind an existing host path read-write
   --ro-bind SOURCE TARGET
@@ -48,12 +50,18 @@ pub struct Bind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessUser {
+    Named(String),
+    Numeric { uid: u32, gid: u32 },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub rootfs: PathBuf,
     pub overlay_device: Option<PathBuf>,
     pub overlay_id: Option<OsString>,
     pub workdir: PathBuf,
-    pub user: Option<String>,
+    pub user: Option<ProcessUser>,
     pub standard_mounts: bool,
     pub binds: Vec<Bind>,
     pub tmpfs: Vec<PathBuf>,
@@ -69,9 +77,22 @@ pub enum ConfigError {
     UnknownOption(OsString),
     InvalidOverlayId,
     InvalidUserName(OsString),
-    InvalidPath { field: &'static str, path: PathBuf },
+    InvalidUserId {
+        option: &'static str,
+        value: OsString,
+    },
+    DuplicateUserOption(&'static str),
+    ConflictingUserOptions,
+    IncompleteNumericUser,
+    InvalidPath {
+        field: &'static str,
+        path: PathBuf,
+    },
     DuplicateMountTarget(PathBuf),
-    OverlappingMountTargets { first: PathBuf, second: PathBuf },
+    OverlappingMountTargets {
+        first: PathBuf,
+        second: PathBuf,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -93,6 +114,21 @@ impl fmt::Display for ConfigError {
                     "user name must match [A-Za-z_][A-Za-z0-9_.-]{{0,63}}: {}",
                     name.to_string_lossy()
                 )
+            }
+            Self::InvalidUserId { option, value } => write!(
+                formatter,
+                "{option} must be a decimal integer between 0 and {}: {}",
+                u32::MAX - 1,
+                value.to_string_lossy()
+            ),
+            Self::DuplicateUserOption(option) => {
+                write!(formatter, "user option {option} is duplicated")
+            }
+            Self::ConflictingUserOptions => {
+                formatter.write_str("--user cannot be combined with --uid or --gid")
+            }
+            Self::IncompleteNumericUser => {
+                formatter.write_str("--uid and --gid must be specified together")
             }
             Self::InvalidPath { field, path } => {
                 write!(
@@ -129,6 +165,10 @@ pub enum RuntimeError {
         target: PathBuf,
     },
     UserNotFound(String),
+    InvalidNumericUser {
+        uid: u32,
+        gid: u32,
+    },
     InvalidPasswdEntry {
         line: usize,
         reason: &'static str,
@@ -176,6 +216,9 @@ impl fmt::Display for RuntimeError {
                 target.display()
             ),
             Self::UserNotFound(user) => write!(formatter, "user_not_found: {user}"),
+            Self::InvalidNumericUser { uid, gid } => {
+                write!(formatter, "invalid_numeric_user: {uid}:{gid}")
+            }
             Self::InvalidPasswdEntry { line, reason } => {
                 write!(formatter, "invalid_passwd_entry: line {line}: {reason}")
             }
@@ -210,7 +253,9 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
     let mut overlay_device = None;
     let mut overlay_id = None;
     let mut workdir = PathBuf::from("/");
-    let mut user = None;
+    let mut user_name = None;
+    let mut uid = None;
+    let mut gid = None;
     let mut standard_mounts = false;
     let mut binds = Vec::new();
     let mut tmpfs = Vec::new();
@@ -250,12 +295,38 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
                 if !valid_user_name(&value) {
                     return Err(ConfigError::InvalidUserName(value));
                 }
-                user = Some(
-                    arguments[index]
-                        .to_str()
-                        .expect("validated user name is UTF-8")
-                        .to_owned(),
-                );
+                if user_name
+                    .replace(
+                        arguments[index]
+                            .to_str()
+                            .expect("validated user name is UTF-8")
+                            .to_owned(),
+                    )
+                    .is_some()
+                {
+                    return Err(ConfigError::DuplicateUserOption("--user"));
+                }
+            }
+            Some("--uid") | Some("--gid") => {
+                let option = if argument == "--uid" {
+                    "--uid"
+                } else {
+                    "--gid"
+                };
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .cloned()
+                    .ok_or(ConfigError::MissingValue(option))?;
+                let id = parse_user_id(option, &value)?;
+                let target = if option == "--uid" {
+                    &mut uid
+                } else {
+                    &mut gid
+                };
+                if target.replace(id).is_some() {
+                    return Err(ConfigError::DuplicateUserOption(option));
+                }
             }
             Some("--standard-mounts") => {
                 standard_mounts = true;
@@ -312,6 +383,14 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
     }
     validate_mount_targets(standard_mounts, &binds, &tmpfs)?;
 
+    let user = match (user_name, uid, gid) {
+        (Some(name), None, None) => Some(ProcessUser::Named(name)),
+        (Some(_), _, _) => return Err(ConfigError::ConflictingUserOptions),
+        (None, Some(uid), Some(gid)) => Some(ProcessUser::Numeric { uid, gid }),
+        (None, None, None) => None,
+        (None, _, _) => return Err(ConfigError::IncompleteNumericUser),
+    };
+
     Ok(Config {
         rootfs,
         overlay_device,
@@ -322,6 +401,18 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
         binds,
         tmpfs,
         command,
+    })
+}
+
+fn parse_user_id(option: &'static str, value: &OsStr) -> Result<u32, ConfigError> {
+    let parsed = value
+        .to_str()
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value != u32::MAX);
+    parsed.ok_or_else(|| ConfigError::InvalidUserId {
+        option,
+        value: value.to_os_string(),
     })
 }
 
@@ -502,7 +593,10 @@ mod tests {
         assert_eq!(config.overlay_id, Some(OsString::from("fastapi")));
         assert!(config.standard_mounts);
         assert_eq!(config.workdir, Path::new("/work"));
-        assert_eq!(config.user.as_deref(), Some("app"));
+        assert_eq!(
+            config.user.as_ref(),
+            Some(&ProcessUser::Named("app".into()))
+        );
         assert_eq!(
             config.binds,
             vec![
@@ -616,7 +710,7 @@ mod tests {
                 "/bin/app",
             ]))
             .unwrap();
-            assert_eq!(config.user.as_deref(), Some(name));
+            assert_eq!(config.user.as_ref(), Some(&ProcessUser::Named(name.into())));
         }
         for name in ["", "1234", "../app", "app:group", "app user"] {
             assert!(matches!(
@@ -631,5 +725,89 @@ mod tests {
                 Err(ConfigError::InvalidUserName(_))
             ));
         }
+    }
+
+    #[test]
+    fn parses_and_validates_numeric_users() {
+        let config = parse_args(arguments(&[
+            "--rootfs",
+            "/images/app",
+            "--uid",
+            "65532",
+            "--gid",
+            "65531",
+            "--",
+            "/bin/app",
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.user,
+            Some(ProcessUser::Numeric {
+                uid: 65_532,
+                gid: 65_531,
+            })
+        );
+
+        for value in ["", "-1", "+1", "app", "4294967295", "4294967296"] {
+            assert!(matches!(
+                parse_args(arguments(&[
+                    "--rootfs",
+                    "/images/app",
+                    "--uid",
+                    value,
+                    "--gid",
+                    "1",
+                    "--",
+                    "/bin/app",
+                ])),
+                Err(ConfigError::InvalidUserId {
+                    option: "--uid",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_conflicting_and_duplicate_users() {
+        assert_eq!(
+            parse_args(arguments(&[
+                "--rootfs",
+                "/images/app",
+                "--uid",
+                "1000",
+                "--",
+                "/bin/app",
+            ])),
+            Err(ConfigError::IncompleteNumericUser)
+        );
+        assert_eq!(
+            parse_args(arguments(&[
+                "--rootfs",
+                "/images/app",
+                "--user",
+                "app",
+                "--uid",
+                "1000",
+                "--gid",
+                "1000",
+                "--",
+                "/bin/app",
+            ])),
+            Err(ConfigError::ConflictingUserOptions)
+        );
+        assert_eq!(
+            parse_args(arguments(&[
+                "--rootfs",
+                "/images/app",
+                "--user",
+                "app",
+                "--user",
+                "root",
+                "--",
+                "/bin/app",
+            ])),
+            Err(ConfigError::DuplicateUserOption("--user"))
+        );
     }
 }

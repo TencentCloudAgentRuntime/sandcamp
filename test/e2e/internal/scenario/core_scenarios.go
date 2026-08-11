@@ -67,6 +67,32 @@ func namedUserScenario(name, processName string, port int) Scenario {
 	}
 }
 
+func sidecarNumericUser() Scenario {
+	return Scenario{
+		Name:          "sidecar-numeric-user",
+		Category:      "identity",
+		Description:   "Run a sidecar with explicit numeric IDs that need no passwd entry.",
+		ExpectedState: ExpectedRunning,
+		Build: func(runID, token string) sandcamp.Spec {
+			worker := workerProcess("worker-a", 18082, runID, token)
+			worker.User = &sandcamp.ProcessUser{UID: 42420, GID: 42421}
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observerProcess(runID, token), worker},
+				Main:     []sandcamp.Process{mainProcess(runID, token)},
+			}
+		},
+		Validate: func(snapshot model.Snapshot, _ map[string]model.FetchResult) []Check {
+			processes := indexProcesses(snapshot.Processes)
+			worker, found := processes["worker-a"]
+			checks := []Check{checkProcessNames(processes, "observer", "worker-a", "main")}
+			if !found {
+				return checks
+			}
+			return append(checks, nonRootIdentityChecks("sidecar-numeric", worker, 42420, 42421)...)
+		},
+	}
+}
+
 func mainNumericUser() Scenario {
 	return Scenario{
 		Name:          "main-numeric-user",
@@ -100,6 +126,97 @@ func mainNumericUser() Scenario {
 					"main has no_new_privs enabled", main.Status),
 			)
 		},
+	}
+}
+
+func mainNamedUser() Scenario {
+	return Scenario{
+		Name:          "main-named-user",
+		Category:      "identity",
+		Description:   "Resolve a main-image user before init jobs and run the main service with the cached IDs.",
+		ExpectedState: ExpectedRunning,
+		Build: func(runID, token string) sandcamp.Spec {
+			rewritePasswd := sandcamp.Process{
+				Name: "rewrite-passwd",
+				Kind: sandcamp.RunToCompletion,
+				Command: []string{
+					"/bin/sh",
+					"-c",
+					"sed -i 's/^app:x:65532:65532:/app:x:42420:42421:/' /etc/passwd",
+				},
+				Timeout: 2 * time.Second,
+			}
+			main := mainProcess(runID, token)
+			main.User = &sandcamp.ProcessUser{Name: "app"}
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observerProcess(runID, token)},
+				Main:     []sandcamp.Process{rewritePasswd, main},
+			}
+		},
+		Validate: func(snapshot model.Snapshot, _ map[string]model.FetchResult) []Check {
+			processes := indexProcesses(snapshot.Processes)
+			main, found := processes["main"]
+			checks := []Check{checkProcessNames(processes, "observer", "main")}
+			if !found {
+				return checks
+			}
+			return append(checks, nonRootIdentityChecks("main-named", main, 65532, 65532)...)
+		},
+	}
+}
+
+func explicitRootUser() Scenario {
+	return Scenario{
+		Name:          "explicit-root-user",
+		Category:      "identity",
+		Description:   "Explicit root identities keep root capabilities and do not enable no_new_privs.",
+		ExpectedState: ExpectedRunning,
+		Build: func(runID, token string) sandcamp.Spec {
+			worker := workerProcess("worker-a", 18082, runID, token)
+			worker.User = &sandcamp.ProcessUser{UID: 0, GID: 0}
+			main := mainProcess(runID, token)
+			main.User = &sandcamp.ProcessUser{Name: "root"}
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observerProcess(runID, token), worker},
+				Main:     []sandcamp.Process{main},
+			}
+		},
+		Validate: func(snapshot model.Snapshot, _ map[string]model.FetchResult) []Check {
+			processes := indexProcesses(snapshot.Processes)
+			checks := []Check{checkProcessNames(processes, "observer", "worker-a", "main")}
+			for _, name := range []string{"worker-a", "main"} {
+				process, found := processes[name]
+				if !found {
+					continue
+				}
+				checks = append(checks,
+					equalCheck(name+"-explicit-root", process.UID == 0 && process.GID == 0,
+						"explicit root resolves to 0:0", map[string]any{"uid": process.UID, "gid": process.GID}),
+					equalCheck(name+"-root-capabilities", process.Status["CapEff"] != "0000000000000000",
+						"explicit root retains effective capabilities", process.Status),
+					equalCheck(name+"-root-no-new-privileges", process.Status["NoNewPrivs"] == "0",
+						"explicit root does not enable no_new_privs", process.Status),
+				)
+			}
+			return checks
+		},
+	}
+}
+
+func nonRootIdentityChecks(prefix string, process model.Process, uid, gid int) []Check {
+	zeroCaps := process.Status["CapInh"] == "0000000000000000" &&
+		process.Status["CapPrm"] == "0000000000000000" &&
+		process.Status["CapEff"] == "0000000000000000" &&
+		process.Status["CapAmb"] == "0000000000000000"
+	return []Check{
+		equalCheck(prefix+"-identity", process.UID == uid && process.GID == gid,
+			"process runs with the expected identity", map[string]any{"uid": process.UID, "gid": process.GID}),
+		equalCheck(prefix+"-groups-cleared", len(process.Groups) == 0,
+			"process has no supplementary groups", process.Groups),
+		equalCheck(prefix+"-capabilities-cleared", zeroCaps,
+			"non-root capability sets are empty", process.Status),
+		equalCheck(prefix+"-no-new-privileges", process.Status["NoNewPrivs"] == "1",
+			"non-root process has no_new_privs enabled", process.Status),
 	}
 }
 

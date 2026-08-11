@@ -1,14 +1,18 @@
 use crate::SPEC_ENVIRONMENT;
 use crate::ready::ReadyState;
-use crate::spec::{Bind, MainProcess, NumericUser, Probe, ProcessKind, SidecarProcess, Spec};
+use crate::spec::{
+    Bind, MainProcess, NumericUser, Probe, ProcessKind, ProcessUser, SidecarProcess, Spec,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -18,7 +22,23 @@ use std::time::{Duration, Instant};
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const KILL_GRACE: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_PASSWD_BYTES: u64 = 1024 * 1024;
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
 
 #[derive(Debug)]
 pub struct RuntimeError(String);
@@ -47,7 +67,7 @@ enum ProcessSource {
         overlay_device: Option<String>,
         standard_mounts: bool,
         binds: Vec<Bind>,
-        user: Option<String>,
+        user: Option<ProcessUser>,
     },
 }
 
@@ -155,7 +175,7 @@ pub fn run(spec: Spec, ready: ReadyState) -> Result<i32, RuntimeError> {
     RECEIVED_SIGNAL.store(0, Ordering::Release);
     install_runtime_contract()?;
     let sandrun = sandrun_path()?;
-    let declarations = flatten(spec);
+    let declarations = flatten(spec)?;
     let mut supervisor = Supervisor::new(ready);
 
     for process in declarations {
@@ -234,8 +254,8 @@ impl Supervisor {
 
     fn spawn(&mut self, process: LaunchProcess, sandrun: &Path) -> io::Result<usize> {
         let mut command = build_command(&process, sandrun);
-        let numeric_user = match process.source {
-            ProcessSource::Main { user } => user,
+        let numeric_user = match &process.source {
+            ProcessSource::Main { user } => *user,
             ProcessSource::Sidecar { .. } => None,
         };
         unsafe {
@@ -244,7 +264,7 @@ impl Supervisor {
                     return Err(io::Error::last_os_error());
                 }
                 if let Some(user) = numeric_user {
-                    drop_process_privileges(user)?;
+                    apply_main_identity(user)?;
                 }
                 Ok(())
             });
@@ -567,11 +587,117 @@ impl Supervisor {
     }
 }
 
-fn flatten(spec: Spec) -> Vec<LaunchProcess> {
+// Main processes share campd's root filesystem. Resolve every named identity
+// before the first declaration starts so an init job cannot change the
+// identity of a later service by rewriting /etc/passwd.
+fn resolve_main_users(
+    processes: &[MainProcess],
+) -> Result<BTreeMap<String, NumericUser>, RuntimeError> {
+    if !processes
+        .iter()
+        .any(|process| matches!(&process.user, Some(ProcessUser::Named(_))))
+    {
+        return Ok(BTreeMap::new());
+    }
+
+    let contents = read_main_passwd(Path::new("/etc/passwd"))?;
+    let mut resolved = BTreeMap::new();
+    for process in processes {
+        let Some(ProcessUser::Named(user)) = &process.user else {
+            continue;
+        };
+        if !resolved.contains_key(&user.name) {
+            resolved.insert(user.name.clone(), parse_main_passwd(&contents, &user.name)?);
+        }
+    }
+    Ok(resolved)
+}
+
+fn read_main_passwd(path: &Path) -> Result<String, RuntimeError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        RuntimeError::new(format!(
+            "main passwd_stat_failed: {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(RuntimeError::new(
+            "main invalid_passwd_entry: /etc/passwd is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_PASSWD_BYTES {
+        return Err(RuntimeError::new("main passwd_too_large: /etc/passwd"));
+    }
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    File::open(path)
+        .and_then(|file| file.take(MAX_PASSWD_BYTES + 1).read_to_end(&mut contents))
+        .map_err(|error| {
+            RuntimeError::new(format!(
+                "main passwd_read_failed: {}: {error}",
+                path.display()
+            ))
+        })?;
+    if contents.len() as u64 > MAX_PASSWD_BYTES {
+        return Err(RuntimeError::new("main passwd_too_large: /etc/passwd"));
+    }
+    String::from_utf8(contents)
+        .map_err(|_| RuntimeError::new("main invalid_passwd_entry: /etc/passwd is not UTF-8"))
+}
+
+fn parse_main_passwd(contents: &str, user: &str) -> Result<NumericUser, RuntimeError> {
+    let mut found = None;
+    for (index, line) in contents.lines().enumerate() {
+        let line_number = index + 1;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split(':').collect::<Vec<_>>();
+        if fields.first().copied() != Some(user) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(RuntimeError::new(format!(
+                "main invalid_passwd_entry: line {line_number}: user name is duplicated"
+            )));
+        }
+        if fields.len() != 7 {
+            return Err(RuntimeError::new(format!(
+                "main invalid_passwd_entry: line {line_number}: matching entry must contain seven fields"
+            )));
+        }
+        let uid = parse_main_passwd_id(fields[2], line_number, "UID is invalid")?;
+        let gid = parse_main_passwd_id(fields[3], line_number, "GID is invalid")?;
+        found = Some(NumericUser { uid, gid });
+    }
+    found.ok_or_else(|| RuntimeError::new(format!("main user_not_found: {user}")))
+}
+
+fn parse_main_passwd_id(
+    value: &str,
+    line: usize,
+    reason: &'static str,
+) -> Result<u32, RuntimeError> {
+    let id = value.parse::<u32>().map_err(|_| {
+        RuntimeError::new(format!("main invalid_passwd_entry: line {line}: {reason}"))
+    })?;
+    if id == u32::MAX {
+        return Err(RuntimeError::new(format!(
+            "main invalid_passwd_entry: line {line}: {reason}"
+        )));
+    }
+    Ok(id)
+}
+
+fn flatten(spec: Spec) -> Result<Vec<LaunchProcess>, RuntimeError> {
+    let main_users = resolve_main_users(&spec.main)?;
     let mut result = Vec::with_capacity(spec.sidecars.len() + spec.main.len());
     result.extend(spec.sidecars.into_iter().map(from_sidecar));
-    result.extend(spec.main.into_iter().map(from_main));
-    result
+    result.extend(
+        spec.main
+            .into_iter()
+            .map(|process| from_main(process, &main_users)),
+    );
+    Ok(result)
 }
 
 fn from_sidecar(process: SidecarProcess) -> LaunchProcess {
@@ -588,12 +714,24 @@ fn from_sidecar(process: SidecarProcess) -> LaunchProcess {
             overlay_device: process.overlay_device,
             standard_mounts: process.standard_mounts,
             binds: process.binds,
-            user: process.user.map(|user| user.name),
+            user: process.user,
         },
     }
 }
 
-fn from_main(process: MainProcess) -> LaunchProcess {
+fn from_main(
+    process: MainProcess,
+    resolved_users: &BTreeMap<String, NumericUser>,
+) -> LaunchProcess {
+    let user = match process.user {
+        Some(ProcessUser::Named(user)) => Some(
+            *resolved_users
+                .get(&user.name)
+                .expect("all named main users are resolved before launch"),
+        ),
+        Some(ProcessUser::Numeric(user)) => Some(user),
+        None => None,
+    };
     LaunchProcess {
         name: process.name,
         kind: process.kind,
@@ -602,7 +740,7 @@ fn from_main(process: MainProcess) -> LaunchProcess {
         workdir: process.workdir,
         readiness_probe: process.readiness_probe,
         completion_timeout_ms: process.completion_timeout_ms,
-        source: ProcessSource::Main { user: process.user },
+        source: ProcessSource::Main { user },
     }
 }
 
@@ -640,7 +778,18 @@ fn build_command(process: &LaunchProcess, sandrun: &Path) -> Command {
                 command.args(["--workdir", &process.workdir]);
             }
             if let Some(user) = user {
-                command.args(["--user", user]);
+                match user {
+                    ProcessUser::Named(user) => {
+                        command.args(["--user", &user.name]);
+                    }
+                    ProcessUser::Numeric(user) => {
+                        command
+                            .arg("--uid")
+                            .arg(user.uid.to_string())
+                            .arg("--gid")
+                            .arg(user.gid.to_string());
+                    }
+                }
             }
             command.arg("--");
             command.args(&process.command);
@@ -701,11 +850,25 @@ fn received_signal() -> Option<i32> {
     }
 }
 
-fn drop_process_privileges(user: NumericUser) -> io::Result<()> {
+fn apply_main_identity(user: NumericUser) -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
-    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+    let non_root = user.uid != 0;
+    if non_root
+        && unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            )
+        } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::setgroups(0, ptr::null()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     if unsafe { libc::setresgid(user.gid, user.gid, user.gid) } != 0 {
@@ -714,8 +877,29 @@ fn drop_process_privileges(user: NumericUser) -> io::Result<()> {
     if unsafe { libc::setresuid(user.uid, user.uid, user.uid) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(io::Error::last_os_error());
+    if non_root {
+        let mut header = CapabilityHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if unsafe { libc::getuid() } != user.uid
+        || unsafe { libc::geteuid() } != user.uid
+        || unsafe { libc::getgid() } != user.gid
+        || unsafe { libc::getegid() } != user.gid
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
     Ok(())
 }
@@ -936,7 +1120,9 @@ mod tests {
                     target: "/mnt/share".into(),
                     readonly: false,
                 }],
-                user: Some("app".into()),
+                user: Some(ProcessUser::Named(crate::spec::NamedUser {
+                    name: "app".into(),
+                })),
             },
         };
         let command = build_command(&process, Path::new("/runtime/sandrun"));
@@ -966,6 +1152,85 @@ mod tests {
                 "/opt/proxy/server",
                 "--listen",
             ]
+        );
+    }
+
+    #[test]
+    fn numeric_sidecar_user_is_passed_without_passwd_lookup() {
+        let process = LaunchProcess {
+            name: "worker".into(),
+            kind: ProcessKind::Service,
+            command: vec!["/bin/worker".into()],
+            env: BTreeMap::new(),
+            workdir: String::new(),
+            readiness_probe: None,
+            completion_timeout_ms: None,
+            source: ProcessSource::Sidecar {
+                rootfs: "/mnt/worker".into(),
+                overlay_device: None,
+                standard_mounts: false,
+                binds: Vec::new(),
+                user: Some(ProcessUser::Numeric(NumericUser {
+                    uid: 65_532,
+                    gid: 65_531,
+                })),
+            },
+        };
+        let command = build_command(&process, Path::new("/runtime/sandrun"));
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "--rootfs",
+                "/mnt/worker",
+                "--overlay-id",
+                "worker",
+                "--uid",
+                "65532",
+                "--gid",
+                "65531",
+                "--",
+                "/bin/worker",
+            ]
+        );
+    }
+
+    #[test]
+    fn main_passwd_parser_is_strict() {
+        let contents = concat!(
+            "root:x:0:0:root:/root:/bin/sh\n",
+            "app:x:65532:65531:app:/home/app:/bin/false\n",
+        );
+        assert_eq!(
+            parse_main_passwd(contents, "app").unwrap(),
+            NumericUser {
+                uid: 65_532,
+                gid: 65_531,
+            }
+        );
+        assert!(
+            parse_main_passwd(contents, "missing")
+                .unwrap_err()
+                .to_string()
+                .contains("user_not_found")
+        );
+        assert!(
+            parse_main_passwd(
+                "app:x:65532:65532:a:/home/app:/bin/false\napp:x:1:1:b:/:/bin/false\n",
+                "app",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("duplicated")
+        );
+        assert!(
+            parse_main_passwd("app:x:not-a-uid:1:a:/:/bin/false\n", "app")
+                .unwrap_err()
+                .to_string()
+                .contains("UID is invalid")
         );
     }
 

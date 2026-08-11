@@ -12,7 +12,7 @@ Sandcamp 负责：
 - 编排 Service 和 RunToCompletion Job；
 - 持续聚合 HTTP Readiness；
 - 为 Sidecar 准备 Mount Namespace、OverlayFS 与 `pivot_root`；
-- 应用 Main 数字身份和 Sidecar 镜像命名用户；
+- 为 Main 与 Sidecar 应用镜像命名身份或显式数字身份；
 - 在退出时清理进程组并转发外部信号。
 
 Sandcamp 不负责 Tool/Instance API、鉴权、Registry 元数据解析、单进程重启、cgroup
@@ -47,27 +47,30 @@ Renderer 按以下顺序转换：
 2. 通过 `Process.Name` 找到同名 `SidecarImage`；
 3. 为 Sidecar 注入 SDK 管理的 MountPath、Overlay 设备和标准挂载开关；
 4. 把 `Expose` 汇总为 AGS Ports；
-5. 把剩余进程声明序列化为 runtime declaration v2；
+5. 把剩余进程声明序列化为 runtime declaration v3；
 6. Base64 编码后写入 `SANDCAMP_SPEC`。
 
-runtime declaration 是 Go SDK 与 campd 之间的 wire 协议，不是第二套公开 API。其形状
+runtime declaration 是 Go SDK 与 campd 之间的 wire 协议，不是第二套公开 API。v3
+为 Main 和 Sidecar 统一了两种 User 形状；新 campd 仍接受既有 v2 声明。其形状
 概念上如下：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "sidecars": [{
     "name": "proxy",
     "kind": "service",
     "rootfs": "/mnt/sandcamp-sidecars/proxy",
     "overlay_device": "/dev/vda",
     "standard_mounts": true,
-    "command": ["/opt/proxy/server"]
+    "command": ["/opt/proxy/server"],
+    "user": {"name": "app"}
   }],
   "main": [{
     "name": "api",
     "kind": "service",
-    "command": ["/app/server"]
+    "command": ["/app/server"],
+    "user": {"uid": 65532, "gid": 65532}
   }]
 }
 ```
@@ -100,10 +103,11 @@ campd 启动后：
 1. 解码并再次校验 runtime declaration；
 2. 在 `0.0.0.0:49982` 启动初始为 503 的 `/ready`；
 3. 设置 Child Subreaper 和信号处理器；
-4. 把 Sidecars 与 Main 合并为“Sidecars 在前、Main 在后”的有序列表；
-5. 为每个声明创建独立进程组，并按 Kind 执行启动 Gate；
-6. 所有声明处理成功后，将初始化状态标记为完成；
-7. 持续回收子进程、执行 Readiness Probe，并更新聚合状态。
+4. 在任何声明启动前，从主镜像 `/etc/passwd` 解析并缓存全部 Main 命名身份；
+5. 把 Sidecars 与 Main 合并为“Sidecars 在前、Main 在后”的有序列表；
+6. 为每个声明创建独立进程组，并按 Kind 执行启动 Gate；
+7. 所有声明处理成功后，将初始化状态标记为完成；
+8. 持续回收子进程、执行 Readiness Probe，并更新聚合状态。
 
 Main 直接在主 Mount Namespace 中执行，可访问主镜像 RootFS 和 Tool StorageMount。
 Sidecar 通过与 campd 同目录的 sandrun 执行。
@@ -172,7 +176,7 @@ Image Volume 提供只读 OCI 文件树，但不会自动应用镜像 Config，�
 4. 以 Sidecar Image Volume 为 lowerdir 创建 OverlayFS；
 5. 应用显式 Bind/tmpfs 和标准运行时挂载；
 6. 执行 `pivot_root`，断开旧 RootFS；
-7. 应用 WorkDir 与可选命名用户；
+7. 应用 WorkDir 与可选的命名或数字身份；
 8. 直接 `execve` Sidecar 命令。
 
 Overlay Identity 使用 `overlay-id + canonical rootfs` 的 SHA-256，写层位于
@@ -190,15 +194,23 @@ Main：
 - 继承主镜像和 AGS 启动环境；
 - `Process.Env` 覆盖同名值；
 - exec 前移除 `SANDCAMP_SPEC`；
-- `User` 只接受数字 UID/GID；nil 保持 root。
+- `User.Name` 从主镜像 `/etc/passwd` 解析，且在任何进程启动前缓存；
+- 数字 UID/GID 直接应用，不查询 passwd。
 
 Sidecar：
 
 - 启动前清空继承环境，只注入 `Process.Env`；
-- `User` 只接受镜像 `/etc/passwd` 中的用户名；nil 保持 root；
-- 挂载和 WorkDir 完成后清空附加组与四组 Capability；
-- 依次执行 `setresgid`、`setresuid` 和 `PR_SET_NO_NEW_PRIVS`；
+- `User.Name` 从自己的 immutable lower `/etc/passwd` 解析；
+- 数字 UID/GID 直接传给 sandrun，不查询 passwd；
 - 不支持 NSS/LDAP、`user:group`、附加组解析或自动环境变量。
+
+两类进程共享以下身份语义：
+
+- `User=nil` 继承运行时身份，通常为 root；
+- 显式身份会设置主 GID/UID 并清空附加组；
+- 非 root 会进一步清空四组 Capability 并设置 `PR_SET_NO_NEW_PRIVS`；
+- 显式 `0:0` 或名称 `root` 保留 root Capability，且不设置 `no_new_privs`；
+- 名称缺失、重复或 passwd 条目非法时直接失败，不回退 root。
 
 ## Namespace 与安全边界
 

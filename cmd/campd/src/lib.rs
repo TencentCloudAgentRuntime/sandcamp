@@ -7,8 +7,8 @@ mod ready;
 mod runtime;
 
 pub use spec::{
-    Bind, MainProcess, NamedUser, NumericUser, Probe, ProcessKind, SidecarProcess, Spec, SpecError,
-    decode,
+    Bind, MainProcess, NamedUser, NumericUser, Probe, ProcessKind, ProcessUser, SidecarProcess,
+    Spec, SpecError, decode,
 };
 
 use std::error::Error;

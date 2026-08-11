@@ -18,7 +18,7 @@
 - Command 第一个元素是否为规范化绝对路径；
 - Env Key 是否合法，Value 是否包含 NUL；
 - WorkDir 是否为规范化绝对路径；
-- Main 是否使用数字 UID/GID、Sidecar 是否使用命名用户；
+- User 是否只选择了一种模式：有效 Name，或非保留的数字 UID/GID；
 - Kind、Probe 与 Timeout 的组合是否匹配；
 - 声明中是否至少有一个 Service。
 
@@ -127,6 +127,16 @@ sandrun argv，并在内部把业务命令放到 `--` 分隔符之后；公开 S
 Main 和 Sidecar 都通过 `Process.WorkDir` 声明镜像内工作目录。Main 的 WorkDir
 由 campd 直接处理；Sidecar 的 WorkDir 由 campd 转换为 sandrun `--workdir`，在
 `pivot_root` 后解析。调用方不应自行拼接 `--workdir`。
+
+### `user_not_found` 或 `invalid_passwd_entry`
+
+命名 Main 用户从主镜像 `/etc/passwd` 解析；命名 Sidecar 用户从对应 Sidecar
+immutable lower RootFS 的 `/etc/passwd` 解析。确认名称位于正确镜像中，匹配条目
+恰好有七个字段，UID/GID 是有效 `uint32` 且不是 `4294967295`。Sandcamp 不查询
+NSS/LDAP，也不会回退 root。
+
+如果应用只需要固定的文件权限身份，可以改用成对的数字 UID/GID；数字模式不查询
+passwd，也不会创建 Home 目录或设置用户环境变量。
 
 ## 6. Init Job 失败
 

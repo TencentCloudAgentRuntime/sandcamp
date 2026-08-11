@@ -20,6 +20,23 @@ func missingNamedUser() Scenario {
 	}
 }
 
+func missingMainNamedUser() Scenario {
+	return Scenario{
+		Name:          "missing-main-named-user",
+		Category:      "expected-reject",
+		Description:   "Reject a main user that is absent from the main image /etc/passwd.",
+		ExpectedState: ExpectedStopped,
+		Build: func(runID, token string) sandcamp.Spec {
+			main := mainProcess(runID, token)
+			main.User = &sandcamp.ProcessUser{Name: "does-not-exist"}
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observerProcess(runID, token)},
+				Main:     []sandcamp.Process{main},
+			}
+		},
+	}
+}
+
 func missingSidecarExecutable() Scenario {
 	return Scenario{
 		Name:          "missing-sidecar-executable",

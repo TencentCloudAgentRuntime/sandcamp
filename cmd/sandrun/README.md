@@ -15,8 +15,7 @@ Mount Namespace 和 `pivot_root` 用于保证依赖正确：可执行文件、Dy
 - 继承调用方的 Network Namespace、PID、进程组、cgroup、环境变量、文件描述符
   和 Capabilities；
 - 不负责镜像拉取或解包、cgroup 管理、Seccomp 配置或 Daemon 生命周期；
-- 可按镜像 `/etc/passwd` 中的命名用户，在挂载完成后清理 Capabilities 并切换
-  UID/GID；
+- 可按镜像 `/etc/passwd` 中的命名用户，或显式数字 UID/GID 切换进程身份；
 - 根文件系统准备完成后直接调用 `execve`，不会额外 Fork，因此上层管理器仍然
   管理同一个 PID 和 cgroup。
 
@@ -49,6 +48,13 @@ sandrun \
   --bind /var/lib/sandcamp/fastapi /var/lib/fastapi \
   -- \
   /usr/local/bin/python /opt/fastapi-proxy/app.py
+```
+
+数字身份使用成对的参数，不查询 `/etc/passwd`：
+
+```sh
+sandrun --rootfs /mnt/image-volumes/worker \
+  --uid 65532 --gid 65532 -- /opt/worker/bin/worker
 ```
 
 当前 AGS 集成将 ext4 系统盘暴露为 `/dev/vda`。`--overlay-device`
@@ -87,24 +93,28 @@ OverlayFS 允许 sandrun 在不修改只读 Image Volume 的前提下创建目�
 `User`、`WorkingDir`、`Healthcheck` 和所需 Capabilities 都必须显式转换为进程
 声明和 `sandrun` 参数。
 
-### 命名用户
+### 进程身份
 
-`--user app` 只接受用户名，不接受 UID、组名或 `user:group`。sandrun 从只读
-lower RootFS 的 `/etc/passwd` 解析 UID 和主 GID，避免持久 Overlay upper 修改
-后影响下一次启动身份。
+`--user app` 只接受用户名，不接受组名或 `user:group`。sandrun 从只读 lower
+RootFS 的 `/etc/passwd` 解析 UID 和主 GID，避免持久 Overlay upper 修改后影响
+下一次启动身份。`--uid UID --gid GID` 必须成对出现，直接使用数字，不要求 passwd
+条目，也不会创建用户、组或 Home 目录。两种形式不能组合。
 
 执行顺序为：
 
 1. 以 root 创建 OverlayFS、标准挂载和显式 Bind；
 2. `pivot_root` 并进入 WorkDir；
-3. 清空 Supplementary Groups 和 Ambient Capabilities；
-4. 切换真实/有效/保存 GID 和 UID；
-5. 清空剩余 Effective/Permitted/Inheritable Capabilities，设置
-   `no_new_privs` 并立即 `exec`。
+3. 清空 Supplementary Groups；
+4. 若目标 UID 非 0，清空 Ambient Capabilities；
+5. 切换真实/有效/保存 GID 和 UID；
+6. 若目标 UID 非 0，清空剩余 Effective/Permitted/Inheritable Capabilities，设置
+   `no_new_privs`；
+7. 直接 `exec`。
 
-用户名不存在、passwd 条目非法或重复时返回 125，绝不回退为 root。该参数不查询
-NSS/LDAP，也不自动设置 `HOME`、`USER` 或 `LOGNAME`。省略 `--user` 时保持原有
-root 行为。
+用户名不存在、passwd 条目非法或重复时返回 125，绝不回退为 root。身份切换不查询
+NSS/LDAP、解析附加组，也不自动设置 `HOME`、`USER` 或 `LOGNAME`。省略全部身份参数
+时继承调用方身份，通常为 root；显式 `--uid 0 --gid 0` 或 `--user root` 同样保留
+root Capabilities，且不设置 `no_new_privs`。
 
 ## 与进程管理器集成
 
@@ -138,8 +148,9 @@ Linux 验证脚本会将每个测试镜像导出为独立根文件系统，移�
 - 稳定 Identity 在进程重启后复用写层，并拒绝同一写层的并发挂载；
 - 运行时 DNS 和 Hosts 文件能注入 OverlayFS 根目录；
 - 显式可写 Bind Mount 在切换根目录后仍然有效；
-- 命名用户在挂载完成后获得预期 UID/GID、空附加组、零 Capabilities 和
-  `NoNewPrivs=1`；
+- 命名和数字非 root 用户在挂载完成后获得预期 UID/GID、空附加组、零
+  Capabilities 和 `NoNewPrivs=1`；
+- 数字身份不要求 passwd 条目，显式 root 保留 Capabilities；
 - 缺失用户会以明确错误失败，不回退 root；
 - FastAPI Runtime 和反向代理使用自己的根文件系统；
 - OpenSandbox Egress 在继承的 Network Namespace 中安装 DNS 重定向规则。

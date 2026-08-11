@@ -77,10 +77,16 @@ type Process struct {
 	Timeout time.Duration   // RunToCompletion only.
 }
 
-// ProcessUser selects a process identity. Main processes use numeric UID/GID.
-// Sidecars use Name, resolved from the image's /etc/passwd after sandrun has
-// prepared the root filesystem. Supplementary groups are cleared and
-// no_new_privs is enabled before exec.
+// ProcessUser selects a process identity by image user name or explicit
+// numeric UID/GID. Name and numeric IDs are mutually exclusive. A Main name
+// is resolved from the main image's /etc/passwd; a Sidecar name is resolved
+// from that Sidecar image's immutable lower /etc/passwd. Numeric IDs do not
+// require a passwd entry.
+//
+// User == nil inherits the runtime identity (normally root). Every explicitly
+// selected identity has empty supplementary groups. Explicit root keeps root
+// capabilities; non-root identities have empty capabilities and run with
+// no_new_privs enabled.
 type ProcessUser struct {
 	Name string
 	UID  uint32
@@ -120,7 +126,7 @@ func (spec Spec) Validate() error {
 		if process.Name == "" {
 			return fmt.Errorf("%w: sidecars[%d].name is required", ErrInvalidSpec, index)
 		}
-		if err := validateProcess(process, true, names, ports, &startupBudget, &serviceCount); err != nil {
+		if err := validateProcess(process, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
 		}
 	}
@@ -128,7 +134,7 @@ func (spec Spec) Validate() error {
 		if process.Name == "" {
 			return fmt.Errorf("%w: main[%d].name is required", ErrInvalidSpec, index)
 		}
-		if err := validateProcess(process, false, names, ports, &startupBudget, &serviceCount); err != nil {
+		if err := validateProcess(process, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
 		}
 	}
@@ -146,7 +152,6 @@ func (spec Spec) Validate() error {
 
 func validateProcess(
 	process Process,
-	sidecar bool,
 	names map[string]struct{},
 	ports map[int]struct{},
 	startupBudget *time.Duration,
@@ -172,20 +177,15 @@ func validateProcess(
 		return fmt.Errorf("%w: process %s workdir must be a clean absolute path", ErrInvalidSpec, process.Name)
 	}
 	if process.User != nil {
-		if sidecar {
+		if process.User.Name != "" {
 			if !userNamePattern.MatchString(process.User.Name) {
-				return fmt.Errorf("%w: sidecar process %s user name is invalid", ErrInvalidSpec, process.Name)
+				return fmt.Errorf("%w: process %s user name is invalid", ErrInvalidSpec, process.Name)
 			}
 			if process.User.UID != 0 || process.User.GID != 0 {
-				return fmt.Errorf("%w: sidecar process %s user must use a name only", ErrInvalidSpec, process.Name)
+				return fmt.Errorf("%w: process %s user name and numeric UID/GID are mutually exclusive", ErrInvalidSpec, process.Name)
 			}
-		} else {
-			if process.User.Name != "" {
-				return fmt.Errorf("%w: main process %s user must use numeric UID/GID", ErrInvalidSpec, process.Name)
-			}
-			if process.User.UID == ^uint32(0) || process.User.GID == ^uint32(0) {
-				return fmt.Errorf("%w: process %s user contains the reserved UID/GID value", ErrInvalidSpec, process.Name)
-			}
+		} else if process.User.UID == ^uint32(0) || process.User.GID == ^uint32(0) {
+			return fmt.Errorf("%w: process %s user contains the reserved UID/GID value", ErrInvalidSpec, process.Name)
 		}
 	}
 	for key, value := range process.Env {

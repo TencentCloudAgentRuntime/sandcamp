@@ -207,26 +207,30 @@ type ProcessUser struct {
 }
 ```
 
-Main 使用数字 UID/GID：
+Main 和 Sidecar 都可以使用数字 UID/GID：
 
 ```go
 User: &sandcamp.ProcessUser{UID: 65532, GID: 65532}
 ```
 
-Sidecar 使用镜像内用户名：
+两者也都可以使用进程所属镜像内的用户名：
 
 ```go
 User: &sandcamp.ProcessUser{Name: "app"}
 ```
 
-- Main 不接受 Name；Sidecar 不接受数字 UID/GID；
-- `User=nil` 时 Main 与 Sidecar 都以 root 运行；
+- `Name` 与数字 UID/GID 是互斥的两种模式；
+- Main 名称从主镜像 `/etc/passwd` 解析；Sidecar 名称从对应 immutable lower
+  RootFS 的 `/etc/passwd` 解析；
+- Main 命名身份在任何声明启动前解析并缓存，Init Job 改写 passwd 不会改变后续身份；
+- 数字身份不要求 passwd 条目，也不会创建用户、组或 Home 目录；
+- `User=nil` 时 Main 与 Sidecar 都继承运行时身份，通常为 root；
 - Sandcamp 不自动恢复主镜像 OCI `USER`；
-- Sidecar 用户必须存在于 immutable lower RootFS 的 `/etc/passwd`；
 - 主 GID 取 passwd 条目，不支持 `user:group`；
 - 不查询 NSS/LDAP，不解析附加组；
-- sandrun 清空附加组与 Inheritable/Effective/Permitted/Ambient Capabilities，设置
-  `no_new_privs` 后再执行命名用户进程；
+- 所有显式身份都会清空附加组；非 root 身份还会清空
+  Inheritable/Effective/Permitted/Ambient Capabilities 并设置 `no_new_privs`；
+- 显式 `0:0` 或名称 `root` 保留 root Capabilities，不设置 `no_new_privs`；
 - 用户不存在或 passwd 非法时直接失败，不回退 root；
 - `HOME`、`USER`、`LOGNAME` 由 `Env` 显式设置。
 
@@ -287,7 +291,7 @@ func RenderStart(images ImageSet, spec Spec) (*ags.CustomConfiguration, error)
 | --- | --- |
 | `Command` | `/mnt/sandcamp/bin/campd` |
 | `Args` | `['--']` |
-| `Env` | Base64 编码的 runtime declaration v2 (`SANDCAMP_SPEC`) |
+| `Env` | Base64 编码的 runtime declaration v3 (`SANDCAMP_SPEC`) |
 | `Ports` | 所有 Expose 端口；为空时省略 |
 | `Probe` | AGS `GET /ready:49982` |
 

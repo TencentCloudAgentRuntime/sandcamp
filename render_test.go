@@ -62,7 +62,7 @@ func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 	}
 
 	decoded, raw := decodeRuntimeSpec(t, configuration)
-	if decoded.Version != 2 {
+	if decoded.Version != 3 {
 		t.Fatalf("version = %d", decoded.Version)
 	}
 	if strings.Contains(string(raw), "sandrun") {
@@ -93,7 +93,7 @@ func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 	if fastAPI.RootFS != "/mnt/sandcamp-sidecars/fastapi" || fastAPI.WorkDir != "/opt/fastapi-proxy" {
 		t.Fatalf("fastapi = %#v", fastAPI)
 	}
-	if fastAPI.User == nil || fastAPI.User.Name != "app" {
+	if fastAPI.User == nil || fastAPI.User.Name == nil || *fastAPI.User.Name != "app" || fastAPI.User.UID != nil || fastAPI.User.GID != nil {
 		t.Fatalf("fastapi user = %#v", fastAPI.User)
 	}
 	if fastAPI.ReadinessProbe == nil ||
@@ -114,7 +114,7 @@ func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 	if app.Kind != Service || app.WorkDir != "/app" {
 		t.Fatalf("app = %#v", app)
 	}
-	if app.User == nil || app.User.UID != 65532 || app.User.GID != 65532 {
+	if app.User == nil || app.User.UID == nil || *app.User.UID != 65532 || app.User.GID == nil || *app.User.GID != 65532 || app.User.Name != nil {
 		t.Fatalf("app user = %#v", app.User)
 	}
 
@@ -169,8 +169,30 @@ func TestRenderStartEncodesExplicitRootMainUser(t *testing.T) {
 	}
 	decoded, _ := decodeRuntimeSpec(t, configuration)
 	got := decoded.Main[2].User
-	if got == nil || got.UID != 0 || got.GID != 0 {
+	if got == nil || got.UID == nil || *got.UID != 0 || got.GID == nil || *got.GID != 0 {
 		t.Fatalf("root user = %#v", got)
+	}
+}
+
+func TestRenderStartSupportsBothUserFormsForMainAndSidecars(t *testing.T) {
+	spec := referenceSpec()
+	spec.Sidecars[0].User = &ProcessUser{UID: 65531, GID: 65530}
+	spec.Main[2].User = &ProcessUser{Name: "app"}
+	configuration, err := RenderStart(referenceImages(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, raw := decodeRuntimeSpec(t, configuration)
+	sidecar := decoded.Sidecars[0].User
+	if sidecar == nil || sidecar.UID == nil || *sidecar.UID != 65531 || sidecar.GID == nil || *sidecar.GID != 65530 || sidecar.Name != nil {
+		t.Fatalf("numeric sidecar user = %#v", sidecar)
+	}
+	main := decoded.Main[2].User
+	if main == nil || main.Name == nil || *main.Name != "app" || main.UID != nil || main.GID != nil {
+		t.Fatalf("named main user = %#v", main)
+	}
+	if strings.Contains(string(raw), `"name":"app","uid"`) {
+		t.Fatalf("wire user forms must remain unambiguous: %s", raw)
 	}
 }
 
@@ -284,13 +306,6 @@ func TestRenderStartValidation(t *testing.T) {
 			want: ErrInvalidSpec,
 		},
 		{
-			name: "sidecar numeric user",
-			edit: func(spec *Spec) {
-				spec.Sidecars[0].User = &ProcessUser{UID: 65532, GID: 65532}
-			},
-			want: ErrInvalidSpec,
-		},
-		{
 			name: "invalid sidecar user name",
 			edit: func(spec *Spec) {
 				spec.Sidecars[0].User = &ProcessUser{Name: "../app"}
@@ -298,9 +313,16 @@ func TestRenderStartValidation(t *testing.T) {
 			want: ErrInvalidSpec,
 		},
 		{
-			name: "named main user",
+			name: "mixed named and numeric user",
 			edit: func(spec *Spec) {
-				spec.Main[1].User = &ProcessUser{Name: "app"}
+				spec.Main[1].User = &ProcessUser{Name: "app", UID: 65532, GID: 65532}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "reserved numeric user",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].User = &ProcessUser{UID: ^uint32(0), GID: 65532}
 			},
 			want: ErrInvalidSpec,
 		},

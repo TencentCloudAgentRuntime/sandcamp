@@ -89,8 +89,9 @@ done
 docker volume create "$state_volume" >/dev/null
 docker volume create "$overlay_volume" >/dev/null
 docker run --rm --platform linux/amd64 -v "$state_volume:/state" "$ALPINE_IMAGE" \
-  sh -c "mkdir -p /state/source-dir /state/user-output \
+  sh -c "mkdir -p /state/source-dir /state/user-output /state/numeric-output /state/root-output \
     && chown 65532:65532 /state/user-output \
+    && chown 42420:42421 /state/numeric-output \
     && : > /state/source-file"
 
 expect_bind_failure() {
@@ -197,6 +198,56 @@ docker run --rm --platform linux/amd64 -v "$fastapi_volume:/rootfs:ro" \
   "$ALPINE_IMAGE" test ! -e /rootfs/home/app/overlay-write
 printf 'sandrun_named_user=passed\n'
 printf 'sandrun_named_user_overlay_write=passed\n'
+
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$fastapi_volume:/rootfs:ro" \
+  -v "$state_volume:/state" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --overlay-id numeric-user \
+  --workdir /tmp --standard-mounts --uid 42420 --gid 42421 \
+  --bind /state/numeric-output /mnt/share -- \
+  /bin/sh -c '{
+    printf "uid=%s\n" "$(id -u)"
+    printf "gid=%s\n" "$(id -g)"
+    grep -E "^(Uid|Gid|Groups|CapInh|CapEff|CapPrm|CapAmb|NoNewPrivs):" /proc/self/status
+  } > /mnt/share/identity'
+numeric_identity=$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" cat /state/numeric-output/identity
+)
+printf '%s\n' "$numeric_identity" | rg '^uid=42420$' >/dev/null
+printf '%s\n' "$numeric_identity" | rg '^gid=42421$' >/dev/null
+printf '%s\n' "$numeric_identity" | rg '^Groups:[[:space:]]*$' >/dev/null
+for capability in CapInh CapEff CapPrm CapAmb; do
+  printf '%s\n' "$numeric_identity" | rg "^${capability}:[[:space:]]+0+$" >/dev/null
+done
+printf '%s\n' "$numeric_identity" | rg '^NoNewPrivs:[[:space:]]+1$' >/dev/null
+printf 'sandrun_numeric_user_without_passwd=passed\n'
+
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$alpine_volume:/rootfs:ro" \
+  -v "$state_volume:/state" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --uid 0 --gid 0 \
+  --bind /state/root-output /mnt -- \
+  /bin/sh -c 'grep -E "^(Uid|Gid|Groups|CapEff|NoNewPrivs):" /proc/self/status > /mnt/identity'
+root_identity=$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" cat /state/root-output/identity
+)
+printf '%s\n' "$root_identity" | rg '^Uid:[[:space:]]+0[[:space:]]+0[[:space:]]+0[[:space:]]+0$' >/dev/null
+printf '%s\n' "$root_identity" | rg '^Gid:[[:space:]]+0[[:space:]]+0[[:space:]]+0[[:space:]]+0$' >/dev/null
+root_cap_eff=$(printf '%s\n' "$root_identity" | awk '/^CapEff:/{print $2}')
+test -n "$root_cap_eff"
+test "$root_cap_eff" != '0000000000000000'
+printf '%s\n' "$root_identity" | rg '^NoNewPrivs:[[:space:]]+0$' >/dev/null
+printf 'sandrun_explicit_root_privileges=passed\n'
 
 set +e
 missing_user_output=$(

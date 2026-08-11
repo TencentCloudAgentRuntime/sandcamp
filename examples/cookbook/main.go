@@ -97,11 +97,9 @@ func main() {
 			// 不是主镜像中的路径。
 			Command: []string{"/usr/local/bin/python", "/opt/fastapi-proxy/app.py"},
 			WorkDir: "/opt/fastapi-proxy",
-			// 命名用户必须存在于 Sidecar 镜像只读 RootFS 的 /etc/passwd；
-			// 用户不存在时 sandrun 会直接失败，不会回退到 root。
-			User: &sandcamp.ProcessUser{Name: "app"},
+			// User 省略时继承 root；这个最小示例中的所有进程都以 root 启动。
 			Env: map[string]string{
-				"HOME":         "/home/app",
+				"HOME":         "/root",
 				"PATH":         "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
 				"UPSTREAM_URL": "http://127.0.0.1:8080/",
 			},
@@ -122,7 +120,6 @@ func main() {
 				Command: []string{envdMountPath, "-port", fmt.Sprint(envdPort)},
 				// envd 作为 Main Service 由 campd 管理，不经过 sandrun。
 				// Probe 首次成功后才继续启动 api，并持续参与 /ready 聚合。
-				User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
 				Expose: []int{envdPort},
 				Probe:  sandcamp.HTTPReadinessProbe("/health", envdPort),
 			},
@@ -131,10 +128,8 @@ func main() {
 				// Kind 省略时默认为 Service。
 				Command: []string{"/app/server"},
 				WorkDir: "/app",
-				// Main 使用数字 UID/GID；这里显式以 root 启动。
-				User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
-				Expose: []int{8080},
-				Probe:  sandcamp.HTTPReadinessProbe("/healthz", 8080),
+				Expose:  []int{8080},
+				Probe:   sandcamp.HTTPReadinessProbe("/healthz", 8080),
 			},
 		},
 	}
