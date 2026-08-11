@@ -6,7 +6,6 @@ import (
 
 	"github.com/csjgg/sandcamp"
 	"github.com/csjgg/sandcamp/test/e2e/internal/model"
-	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 
 const (
@@ -130,7 +129,7 @@ func envdCoexistence() Scenario {
 	return Scenario{
 		Name:           "envd-coexistence",
 		Category:       "external-runtime",
-		Description:    "Start envd outside campd while campd continues to supervise its declared processes.",
+		Description:    "Start a separately mounted envd executable as a campd-managed Main service.",
 		ExpectedState:  ExpectedRunning,
 		RequiredImages: []string{"envd"},
 		Settle:         500 * time.Millisecond,
@@ -138,23 +137,35 @@ func envdCoexistence() Scenario {
 			Name: "envd-health", URL: fmt.Sprintf("http://127.0.0.1:%d/health", envdPort), ExpectedStatus: 204,
 		}},
 		Build: func(runID, token string) sandcamp.Spec {
-			return sandcamp.Spec{Sidecars: []sandcamp.Process{observerProcess(runID, token)}, Main: []sandcamp.Process{mainProcess(runID, token)}}
-		},
-		Configure: func(configuration *ags.CustomConfiguration, runID, token string) {
-			configuration.Command = stringPointers("/bin/sh")
-			configuration.Args = stringPointers("-c", fmt.Sprintf(
-				"%s=%s %s=envd %s=%s /mnt/envd-runtime/envd -port 49983 & exec /mnt/sandcamp/bin/campd --",
-				model.RunIDEnvironment, runID, model.NameEnvironment, model.TokenEnvironment, token,
-			))
-			configuration.Ports = append(configuration.Ports, &ags.PortConfiguration{
-				Name: stringPointer("envd"), Port: int64Pointer(envdPort), Protocol: stringPointer("TCP"),
-			})
+			probe := sandcamp.HTTPReadinessProbe("/health", envdPort)
+			probe.StartupTimeout = 4 * time.Second
+			probe.Period = 200 * time.Millisecond
+			probe.Timeout = 500 * time.Millisecond
+			envd := sandcamp.Process{
+				Name:    "envd",
+				Kind:    sandcamp.Service,
+				Command: []string{"/mnt/envd-runtime/envd", "-port", fmt.Sprint(envdPort)},
+				Env: map[string]string{
+					model.RunIDEnvironment: runID,
+					model.NameEnvironment:  "envd",
+					model.TokenEnvironment: token,
+				},
+				User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
+				Expose: []int{envdPort},
+				Probe:  probe,
+			}
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observerProcess(runID, token)},
+				Main:     []sandcamp.Process{envd, mainProcess(runID, token)},
+			}
 		},
 		Validate: func(snapshot model.Snapshot, _ map[string]model.FetchResult) []Check {
 			processes := indexProcesses(snapshot.Processes)
 			envd := processes["envd"]
 			return []Check{
 				checkProcessNames(processes, "observer", "envd", "main"),
+				equalCheck("envd-managed-by-campd", envd.PPID == 1,
+					"envd is a direct child of PID 1 campd", map[string]int{"pid": envd.PID, "ppid": envd.PPID}),
 				equalCheck("envd-outside-sidecar-overlay", envd.Namespaces["mnt"] != "" && envd.Namespaces["mnt"] == processes["main"].Namespaces["mnt"],
 					"envd stays in the main mount namespace instead of a sandrun namespace", namespaceEvidence(envd, processes["main"], "mnt")),
 				equalCheck("envd-runs-root", envd.UID == 0 && envd.GID == 0,

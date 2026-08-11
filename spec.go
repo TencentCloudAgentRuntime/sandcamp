@@ -53,15 +53,16 @@ const (
 
 // Spec declares only the processes needed to make one AGS sandbox start.
 // Sidecars are processed first in declaration order, followed by Main. Every
-// Main process runs in the AGS main image; every Sidecar runs in its matching
-// Image Volume.
+// Main process runs in the AGS main mount namespace, including Tool mounts;
+// every Sidecar runs in its matching Image Volume root filesystem.
 type Spec struct {
 	Sidecars []Process
 	Main     []Process
 }
 
 // Process is an executable plus its lifecycle and readiness metadata.
-// Command[0] and WorkDir are absolute paths inside that process's image.
+// Command[0] and WorkDir are absolute paths visible in that process's root
+// filesystem. Main paths may come from the main image or a Tool mount.
 type Process struct {
 	Name string
 	// Kind defaults to Service when omitted.

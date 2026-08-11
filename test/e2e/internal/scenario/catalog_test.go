@@ -93,6 +93,26 @@ func TestCoreImageSetUsesStableMountNames(t *testing.T) {
 	}
 }
 
+func TestEnvdIsAManagedMainService(t *testing.T) {
+	item, found := ByName("envd-coexistence")
+	if !found {
+		t.Fatal("envd-coexistence scenario is missing")
+	}
+	if item.Configure != nil {
+		t.Fatal("envd must not replace campd with a shell wrapper")
+	}
+	spec := item.Build("envd-run", strings.Repeat("a", 32))
+	if len(spec.Main) != 2 {
+		t.Fatalf("main processes = %d, want envd and main", len(spec.Main))
+	}
+	envd := spec.Main[0]
+	if envd.Name != "envd" || envd.Kind != sandcamp.Service ||
+		len(envd.Command) != 3 || envd.Command[0] != "/mnt/envd-runtime/envd" ||
+		envd.Probe == nil || envd.Probe.Port != envdPort {
+		t.Fatalf("envd is not a managed Main service: %#v", envd)
+	}
+}
+
 func TestBoundaryScenariosRemainExplicit(t *testing.T) {
 	want := map[string]bool{
 		"shared-probe-endpoint":         false,

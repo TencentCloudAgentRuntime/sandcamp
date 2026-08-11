@@ -93,7 +93,7 @@ task test:stack-linux
 | 身份与权限 | 3 | Main 数字用户、Alpine/glibc Sidecar 命名用户 |
 | 文件系统、进程与网络 | 7 | Overlay、argv/env/workdir、Loopback、公网、Fanout、子进程拓扑 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、setsid、共享 Probe 端点 |
-| 真实镜像与外部 Runtime | 4 | FastAPI root/命名用户、Egress allow/deny、envd 共存 |
+| 真实镜像与额外挂载 | 4 | FastAPI root/命名用户、Egress allow/deny、envd Main Service |
 | 预期拒绝 | 7 | 用户/命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |
 
 测试专用 Runtime 额外包含 root Observer，通过 `/proc` 和主动 HTTP 请求收集有界证据；

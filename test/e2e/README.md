@@ -40,7 +40,7 @@ Readiness 场景则可以直接使用受管 Observer。
 | 身份与权限 | 3 | root、数字 Main、Alpine/glibc 命名用户 |
 | 文件系统、进程与网络 | 7 | Overlay、lower、argv/env/workdir、Loopback、公网、Fanout、子进程拓扑 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、`setsid`、共享 Probe 端点 |
-| 真实镜像与外部 Runtime | 4 | FastAPI、Egress allow/deny、envd 共存 |
+| 真实镜像与额外挂载 | 4 | FastAPI、Egress allow/deny、envd Main Service |
 | 非法启动 | 7 | 缺失用户/命令、Probe 超时、启动崩溃、Job 非零与超时 |
 
 用下面的命令查看逐项说明：

@@ -12,7 +12,7 @@
 //	export TENCENTCLOUD_REGION='<region>'
 //	export AGS_ROLE_ARN='<role-arn>'
 //	export SANDCAMP_MAIN_IMAGE='<main-image>'
-//	export SANDCAMP_RUNTIME_IMAGE='<sandcamp-runtime-image>'
+//	export SANDCAMP_RUNTIME_IMAGE='ghcr.io/csjgg/sandcamp-runtime:beta'
 //	export SANDCAMP_SIDECAR_IMAGE='<proxy-image>'
 //	go run ./examples/cookbook
 //
@@ -37,6 +37,15 @@ import (
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
+)
+
+const (
+	// 这是 AGS 对外提供的 envd 镜像。Cookbook 只挂载其中的单个静态可执行文件，
+	// 不把该镜像作为 Sidecar RootFS 使用。
+	envdImage     = "ccr.ccs.tencentyun.com/ags-image/envd:fixed-0.6.13"
+	envdSubPath   = "/usr/bin/envd"
+	envdMountPath = "/mnt/envd-runtime/envd"
+	envdPort      = 49983
 )
 
 func main() {
@@ -95,20 +104,31 @@ func main() {
 			// 并把结果聚合到 campd 的 /ready。
 			Probe: sandcamp.HTTPReadinessProbe("/healthz", 9200),
 		}},
-		// Main 是数组；每一项都直接使用同一个 AGS 主镜像 RootFS。
-		// Sidecars 完成启动 Gate 后，Main 再按声明顺序处理。这个最小示例
-		// 只启动一个 Main Service；需要初始化任务时可在数组中加入
-		// Kind=RunToCompletion 且带 Timeout 的 Process。
-		Main: []sandcamp.Process{{
-			Name: "api",
-			// Kind 省略时默认为 Service。
-			Command: []string{"/app/server"},
-			WorkDir: "/app",
-			// Main 使用数字 UID/GID；这里显式以 root 启动。
-			User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
-			Expose: []int{8080},
-			Probe:  sandcamp.HTTPReadinessProbe("/healthz", 8080),
-		}},
+		// Main 是数组；每一项都在 AGS 主 Mount Namespace 中执行。Sidecars
+		// 完成启动 Gate 后，Main 再按声明顺序处理。Main 的可执行文件既可以
+		// 来自主镜像，也可以来自 Tool.StorageMounts。
+		Main: []sandcamp.Process{
+			{
+				Name:    "envd",
+				Kind:    sandcamp.Service,
+				Command: []string{envdMountPath, "-port", fmt.Sprint(envdPort)},
+				// envd 作为 Main Service 由 campd 管理，不经过 sandrun。
+				// Probe 首次成功后才继续启动 api，并持续参与 /ready 聚合。
+				User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
+				Expose: []int{envdPort},
+				Probe:  sandcamp.HTTPReadinessProbe("/health", envdPort),
+			},
+			{
+				Name: "api",
+				// Kind 省略时默认为 Service。
+				Command: []string{"/app/server"},
+				WorkDir: "/app",
+				// Main 使用数字 UID/GID；这里显式以 root 启动。
+				User:   &sandcamp.ProcessUser{UID: 0, GID: 0},
+				Expose: []int{8080},
+				Probe:  sandcamp.HTTPReadinessProbe("/healthz", 8080),
+			},
+		},
 	}
 
 	// RenderMounts 生成 Runtime/Sidecar 的只读 StorageMounts。
@@ -116,6 +136,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// envd 不是 Sandcamp Sidecar：文件如何进入主 Mount Namespace 由调用方
+	// 显式配置，进程本身则作为上面的 Main Service 交给 campd 管理。
+	mounts = append(mounts, &ags.StorageMount{
+		Name:      common.StringPtr("envd-runtime"),
+		MountPath: common.StringPtr(envdMountPath),
+		ReadOnly:  common.BoolPtr(true),
+		StorageSource: &ags.StorageSource{Image: &ags.ImageStorageSource{
+			Reference:         common.StringPtr(envdImage),
+			ImageRegistryType: common.StringPtr(registryType),
+			SubPath:           common.StringPtr(envdSubPath),
+		}},
+	})
 	// RenderStart 校验进程声明，并生成 campd Command、SANDCAMP_SPEC、端口和
 	// AGS 唯一的 /ready 探针。SDK 保留结构化进程声明；Sidecar 的 sandrun
 	// 参数由 campd 根据 RootFS、WorkDir、User 和 Command 生成。

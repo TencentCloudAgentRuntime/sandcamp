@@ -156,7 +156,8 @@ RunToCompletion：
 - 完整 argv，不是 Shell 字符串；
 - `Command[0]` 必须是该进程 RootFS 中的规范化绝对路径；
 - 不执行 Shell 展开、变量替换或引号解析；
-- Main 路径来自主镜像；Sidecar 路径来自同名 Sidecar Image Volume；
+- Main 路径在主 Mount Namespace 中解析，可以来自主镜像或 Tool StorageMount；
+- Sidecar 路径来自同名 Sidecar Image Volume；
 - 调用方不拼接 `sandrun` 参数，也不在 `Command` 中加入 `--`。
 
 需要 Shell 时显式声明：
@@ -180,7 +181,7 @@ Command: []string{"/bin/sh", "-c", "exec /app/server --port 8080"}
 
 ### `WorkDir`
 
-- Main：主镜像中的绝对路径；
+- Main：主 Mount Namespace 中的绝对路径，可以位于主镜像或 Tool StorageMount；
 - Sidecar：同名 Sidecar 镜像中的绝对路径；
 - `/` 可作为 WorkDir；
 - Sidecar WorkDir 在 `pivot_root` 后应用。

@@ -105,7 +105,8 @@ campd 启动后：
 6. 所有声明处理成功后，将初始化状态标记为完成；
 7. 持续回收子进程、执行 Readiness Probe，并更新聚合状态。
 
-Main 直接在主镜像 RootFS 中执行。Sidecar 通过与 campd 同目录的 sandrun 执行。
+Main 直接在主 Mount Namespace 中执行，可访问主镜像 RootFS 和 Tool StorageMount。
+Sidecar 通过与 campd 同目录的 sandrun 执行。
 campd 不依赖主镜像的 PATH 查找 Runtime 二进制。
 
 ### Service
