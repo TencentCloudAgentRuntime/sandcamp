@@ -14,6 +14,7 @@ func TestCatalogNamesAndRenderedSpecs(t *testing.T) {
 		AgentGlibc:   "registry.example/agent:glibc",
 		FastAPI:      "registry.example/fastapi:test",
 		Egress:       "registry.example/egress:test",
+		Nginx:        "registry.example/nginx:test",
 		Envd:         "registry.example/envd:test",
 		Main:         "registry.example/main:test",
 		RegistryType: "personal",
@@ -42,12 +43,17 @@ func TestCatalogNamesAndRenderedSpecs(t *testing.T) {
 			if item.ExpectedState == ExpectedRunning && item.Validate == nil {
 				t.Fatal("running scenario has no validator")
 			}
+			if item.MainImage != "" && item.MainImage != "nginx" {
+				t.Fatalf("unknown main image selector %q", item.MainImage)
+			}
 			if item.Lifecycle != nil {
 				if len(item.Lifecycle.Actions) == 0 || item.Lifecycle.FinalState == "" {
 					t.Fatalf("incomplete lifecycle: %#v", item.Lifecycle)
 				}
 				for _, action := range item.Lifecycle.Actions {
-					if action.Name == "" || action.TargetURL == "" || action.Validate == nil {
+					hasTarget := action.TargetURL != ""
+					hasSignal := action.SignalProcess != "" && action.Signal != ""
+					if action.Name == "" || hasTarget == hasSignal || action.Validate == nil {
 						t.Fatalf("incomplete lifecycle action: %#v", action)
 					}
 				}
@@ -66,6 +72,7 @@ func TestCoreImageSetUsesStableMountNames(t *testing.T) {
 		AgentGlibc:   "glibc",
 		FastAPI:      "fastapi",
 		Egress:       "egress",
+		Nginx:        "nginx",
 		RegistryType: "personal",
 	}
 	mounts, err := sandcamp.RenderMounts(CoreImageSet(images))

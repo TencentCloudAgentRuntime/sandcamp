@@ -16,7 +16,13 @@ Runner 为一次测试创建一个 Tool，并按顺序为每个场景创建独�
 - PID、Network、Mount 等 Namespace 链接；
 - argv、工作目录、RootFS 文件系统类型和指定文件；
 - 进程启动、探针变化、信号和退出时间线；
-- 由 Observer 主动发起的 loopback、公网和 Egress 策略请求。
+- 由 Observer 主动发起的 HTTP、HTTPS、UDP 和 Egress 策略请求；
+- 启动前与运行中的 `iptables-save`、`nft list ruleset` 有界快照。
+
+Alpine 测试 Agent 包含 `iptables` 和 `nft`，用于观察共享 Network Namespace；正式
+Runtime 和正式 Sidecar 镜像不包含这些诊断工具。对于 Nginx 这类会重写进程环境的
+真实守护进程，Observer 只按场景声明的绝对可执行文件路径补充跟踪，不做模糊进程名
+匹配。
 
 普通场景把 root Observer 作为第一个 Sidecar。需要让受管进程退出的生命周期场景，
 先由测试 Runtime 启动一个不受 campd 管理的 root Observer，再把 PID 1 替换为
@@ -32,16 +38,19 @@ Readiness 场景则可以直接使用受管 Observer。
 
 ## 场景
 
-当前共有 36 个场景：
+当前共有 49 个场景：
 
 | 范围 | 数量 | 主要内容 |
 | --- | ---: | --- |
 | 启动、组合与 Readiness | 9 | Sidecar-only、多 Main、Main/Sidecar Init Job、无 Probe Service、持续降级/恢复 |
 | 身份与权限 | 3 | root、数字 Main、Alpine/glibc 命名用户 |
-| 文件系统、进程与网络 | 7 | Overlay、lower、argv/env/workdir、Loopback、公网、Fanout、子进程拓扑 |
+| 文件系统、进程与网络 | 10 | Overlay、argv/env/workdir、HTTP 双向 Loopback、UDP、公网、Fanout、子进程拓扑、Netfilter 写入 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、`setsid`、共享 Probe 端点 |
-| 真实镜像与额外挂载 | 4 | FastAPI、Egress allow/deny、envd Main Service |
+| 真实镜像、网络策略与额外挂载 | 14 | FastAPI、Nginx Main 反向代理、Egress HTTP/HTTPS/通配符/默认策略/规则安装与清理、envd |
 | 非法启动 | 7 | 缺失用户/命令、Probe 超时、启动崩溃、Job 非零与超时 |
+
+另外 3 个 Egress 负向场景归入网络策略：非法 JSON、控制端口冲突和 non-root 启动均
+必须在进入 RUNNING 前失败。
 
 用下面的命令查看逐项说明：
 
@@ -67,6 +76,7 @@ task e2e:build
 sandcamp-e2e-agent:alpine-local
 sandcamp-e2e-agent:glibc-local
 sandcamp-runtime:e2e-local
+sandcamp-e2e-nginx:local
 ```
 
 将它们推送到测试环境可访问的镜像仓库后，配置以下环境变量：
@@ -84,11 +94,13 @@ SANDCAMP_E2E_MAIN_IMAGE       # 通常与 Alpine Agent 相同
 SANDCAMP_E2E_FASTAPI_IMAGE    # 运行全部场景时需要
 SANDCAMP_E2E_EGRESS_IMAGE     # 运行全部场景时需要
 SANDCAMP_E2E_ENVD_IMAGE       # 运行全部场景时需要
+SANDCAMP_E2E_NGINX_IMAGE      # 运行全部场景时需要，作为该场景的 Main 镜像
 SANDCAMP_E2E_REGISTRY_TYPE    # 可选，默认 personal
 ```
 
 Runner 为完整矩阵生成 10 个 Storage Mount，包含 Runtime、夹具、真实 Sidecar 和
-envd 单文件挂载；不要再向该 Tool 追加测试无关的 Mount。
+envd 单文件挂载；Nginx 通过 Instance 的 Main Image 覆盖运行，不额外占用 Mount。
+不要再向该 Tool 追加测试无关的 Mount。
 
 ## 运行
 

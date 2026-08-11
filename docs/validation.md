@@ -24,7 +24,7 @@ go vet ./...
 - runtime declaration v2 的 Main/Sidecar 类型分离；
 - Sidecar RootFS 注入、Main 隐式 RootFS 和 AGS Ports 转换；
 - Tool 默认配置与 Instance 配置组合；
-- E2E 36 个场景的 Spec 全量渲染。
+- E2E 49 个场景的 Spec 全量渲染。
 
 ## Rust
 
@@ -85,18 +85,22 @@ task test:stack-linux
 
 ## AGS 运行态回归
 
-[`test/e2e`](../test/e2e/README.md) 是显式运行的云端测试。当前目录包含 36 个场景：
+[`test/e2e`](../test/e2e/README.md) 是显式运行的云端测试。当前目录包含 49 个场景：
 
 | 范围 | 数量 | 主要内容 |
 | --- | ---: | --- |
 | 启动、组合与 Readiness | 9 | Sidecar-only、多 Main、两类 Init Job、无 Probe Service、持续降级/恢复 |
 | 身份与权限 | 3 | Main 数字用户、Alpine/glibc Sidecar 命名用户 |
-| 文件系统、进程与网络 | 7 | Overlay、argv/env/workdir、Loopback、公网、Fanout、子进程拓扑 |
+| 文件系统、进程与网络 | 10 | Overlay、argv/env/workdir、双向 HTTP、UDP、公网、Fanout、子进程拓扑、Netfilter 写入 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、setsid、共享 Probe 端点 |
-| 真实镜像与额外挂载 | 4 | FastAPI root/命名用户、Egress allow/deny、envd Main Service |
+| 真实镜像、网络策略与额外挂载 | 14 | FastAPI、Nginx Main、Egress 多策略与规则生命周期、envd Main Service |
 | 预期拒绝 | 7 | 用户/命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |
 
-测试专用 Runtime 额外包含 root Observer，通过 `/proc` 和主动 HTTP 请求收集有界证据；
+其中 3 个 Egress 负向场景归入网络策略范围，分别验证非法策略、控制端口冲突和
+non-root 权限不足，因此表内各行与场景总数不存在重复计数。
+
+测试专用 Runtime 额外包含 root Observer，通过 `/proc`、主动 HTTP/HTTPS/UDP 请求和
+启动前/运行中 Netfilter 快照收集有界证据；
 正式 Runtime 不包含该二进制。证据只保留白名单环境变量，不记录凭证或 Observer
 Token。
 

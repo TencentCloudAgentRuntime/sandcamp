@@ -22,6 +22,7 @@ type Images struct {
 	AgentGlibc   string
 	FastAPI      string
 	Egress       string
+	Nginx        string
 	Envd         string
 	Main         string
 	RegistryType string
@@ -46,6 +47,7 @@ type Scenario struct {
 	Name           string
 	Category       string
 	Description    string
+	MainImage      string
 	ExpectedState  ExpectedState
 	RequiredImages []string
 	Settle         time.Duration
@@ -71,11 +73,13 @@ type Lifecycle struct {
 // LifecycleAction changes one running process, waits for campd to observe the
 // change, then captures both process state and active HTTP observations.
 type LifecycleAction struct {
-	Name       string
-	TargetURL  string
-	CaptureFor time.Duration
-	Fetches    []Fetch
-	Validate   func(model.Snapshot, map[string]model.FetchResult) []Check
+	Name          string
+	TargetURL     string
+	SignalProcess string
+	Signal        string
+	CaptureFor    time.Duration
+	Fetches       []Fetch
+	Validate      func(model.Snapshot, map[string]model.FetchResult) []Check
 }
 
 func CoreImageSet(images Images) sandcamp.ImageSet {
@@ -123,7 +127,11 @@ func Core() []Scenario {
 		overlayIsolation(),
 		argvEnvironmentWorkdir(),
 		loopbackHTTP(),
+		mainToSidecarHTTP(),
+		sidecarToMainHTTP(),
+		sharedLoopbackUDP(),
 		publicHTTP(),
+		sidecarNetfilterMutation(),
 		maximumProcessFanout(),
 		processGroupChild(),
 		sessionChild(),
@@ -135,7 +143,13 @@ func Core() []Scenario {
 		sharedProbeEndpoint(),
 		fastAPIRootPair(),
 		fastAPINamedUser(),
+		nginxMainReverseProxy(),
 		egressAllowDeny(),
+		egressNetfilterRules(),
+		egressHTTPSAllowDeny(),
+		egressWildcardAllow(),
+		egressDefaultAllowExplicitDeny(),
+		egressRuleCleanup(),
 		envdCoexistence(),
 		missingNamedUser(),
 		missingSidecarExecutable(),
@@ -144,6 +158,9 @@ func Core() []Scenario {
 		crashDuringStartup(),
 		initJobFailure(),
 		initJobTimeout(),
+		egressInvalidPolicy(),
+		egressPortConflict(),
+		egressNonRoot(),
 	}
 }
 

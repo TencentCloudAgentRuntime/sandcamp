@@ -32,7 +32,7 @@ func TestMissingImagesDependsOnSelectedScenarios(t *testing.T) {
 	items := scenario.Core()
 	missing := missingImages(items, scenario.Images{})
 	joined := strings.Join(missing, ",")
-	for _, expected := range []string{"fastapi", "egress", "envd"} {
+	for _, expected := range []string{"fastapi", "egress", "nginx", "envd"} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("missing %s in %q", expected, joined)
 		}
@@ -40,6 +40,16 @@ func TestMissingImagesDependsOnSelectedScenarios(t *testing.T) {
 	minimal, _ := scenario.ByName("minimal-root")
 	if got := missingImages([]scenario.Scenario{minimal}, scenario.Images{}); len(got) != 0 {
 		t.Fatalf("minimal scenario unexpectedly requires %v", got)
+	}
+}
+
+func TestMainImageSelection(t *testing.T) {
+	images := scenario.Images{Main: "main-image", Nginx: "nginx-image"}
+	if got := mainImage(scenario.Scenario{}, images); got != "main-image" {
+		t.Fatalf("default main image = %q", got)
+	}
+	if got := mainImage(scenario.Scenario{MainImage: "nginx"}, images); got != "nginx-image" {
+		t.Fatalf("Nginx main image = %q", got)
 	}
 }
 

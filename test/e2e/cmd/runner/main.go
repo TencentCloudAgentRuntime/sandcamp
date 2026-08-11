@@ -263,6 +263,7 @@ func loadEnvironment() (environment, error) {
 			AgentGlibc:   agentGlibc,
 			FastAPI:      get("SANDCAMP_E2E_FASTAPI_IMAGE"),
 			Egress:       get("SANDCAMP_E2E_EGRESS_IMAGE"),
+			Nginx:        get("SANDCAMP_E2E_NGINX_IMAGE"),
 			Envd:         get("SANDCAMP_E2E_ENVD_IMAGE"),
 			Main:         get("SANDCAMP_E2E_MAIN_IMAGE"),
 			RegistryType: registryType,
@@ -384,7 +385,7 @@ func (r *runner) createTool(defaultScenario scenario.Scenario) error {
 	if err != nil {
 		return fmt.Errorf("render tool start: %w", err)
 	}
-	configuration.Image = stringPointer(r.env.Images.Main)
+	configuration.Image = stringPointer(mainImage(defaultScenario, r.env.Images))
 	configuration.ImageRegistryType = stringPointer(r.env.Images.RegistryType)
 	configuration.Resources = &ags.ResourceConfiguration{CPU: stringPointer("2"), Memory: stringPointer("4Gi")}
 	request := toolCreateRequest{
@@ -432,6 +433,8 @@ func (r *runner) runScenario(item scenario.Scenario) (result scenarioResult) {
 	if item.Configure != nil {
 		item.Configure(configuration, result.RunID, token)
 	}
+	configuration.Image = stringPointer(mainImage(item, r.env.Images))
+	configuration.ImageRegistryType = stringPointer(r.env.Images.RegistryType)
 	response, err := r.agrJSON(r.ctx, instanceCreateRequest{
 		ToolID:              r.toolID,
 		Timeout:             "15m",
@@ -564,11 +567,17 @@ func (r *runner) runScenario(item scenario.Scenario) (result scenarioResult) {
 		previous := snapshot
 		actionsCompleted := true
 		for _, action := range item.Lifecycle.Actions {
-			if err := relayAction(r.ctx, proxy.port, token, action.TargetURL); err != nil {
+			var triggerErr error
+			if action.SignalProcess != "" {
+				triggerErr = signalProcess(r.ctx, proxy.port, token, action.SignalProcess, action.Signal)
+			} else {
+				triggerErr = relayAction(r.ctx, proxy.port, token, action.TargetURL)
+			}
+			if triggerErr != nil {
 				valid = false
 				actionsCompleted = false
 				result.Checks = append(result.Checks, check{
-					Name: action.Name + "-trigger", Status: fail, Summary: "observer could not trigger the lifecycle action", Evidence: redact(err.Error()),
+					Name: action.Name + "-trigger", Status: fail, Summary: "observer could not trigger the lifecycle action", Evidence: redact(triggerErr.Error()),
 				})
 				break
 			}
@@ -695,6 +704,32 @@ func relayAction(ctx context.Context, localPort int, token, target string) error
 	}
 	if relayed.StatusCode < 200 || relayed.StatusCode >= 300 {
 		return fmt.Errorf("target action returned HTTP %d: %s", relayed.StatusCode, relayed.Body)
+	}
+	return nil
+}
+
+func signalProcess(ctx context.Context, localPort int, token, processName, signal string) error {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, err := json.Marshal(map[string]string{"process": processName, "signal": signal})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/signal", localPort), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set(observerTokenHeader, token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("observer signal returned HTTP %d: %s", response.StatusCode, string(body))
 	}
 	return nil
 }
@@ -1166,6 +1201,7 @@ func missingImages(items []scenario.Scenario, images scenario.Images) []string {
 	available := map[string]bool{
 		"fastapi": images.FastAPI != "",
 		"egress":  images.Egress != "",
+		"nginx":   images.Nginx != "",
 		"envd":    images.Envd != "",
 	}
 	seen := make(map[string]struct{})
@@ -1181,4 +1217,15 @@ func missingImages(items []scenario.Scenario, images scenario.Images) []string {
 		}
 	}
 	return result
+}
+
+func mainImage(item scenario.Scenario, images scenario.Images) string {
+	switch item.MainImage {
+	case "", "main":
+		return images.Main
+	case "nginx":
+		return images.Nginx
+	default:
+		return ""
+	}
 }

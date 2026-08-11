@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -121,13 +123,73 @@ func TestFetchInputConstructsLoopbackOnlyInsideObserver(t *testing.T) {
 	if external != "http://example.org/" {
 		t.Fatalf("external target = %q", external)
 	}
+	udp, err := (fetchInput{Scheme: "udp", Host: "loopback", Port: 19082, Path: "/hello%20udp"}).target()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if udp != "udp://127.0.0.1:19082/hello%20udp" {
+		t.Fatalf("UDP target = %q", udp)
+	}
 	for _, input := range []fetchInput{
 		{Scheme: "file", Host: "loopback", Path: "/etc/passwd"},
 		{Scheme: "http", Host: "127.0.0.1:80", Path: "/"},
 		{Scheme: "http", Host: "example.com", Port: 70000, Path: "/"},
+		{Scheme: "udp", Host: "loopback", Path: "/payload"},
 	} {
 		if _, err := input.target(); err == nil {
 			t.Fatalf("unsafe input accepted: %#v", input)
+		}
+	}
+}
+
+func TestUDPEchoFetch(t *testing.T) {
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	errors := make(chan error, 1)
+	go serveUDP(listener, "worker-a", func(string, map[string]any) {}, errors)
+
+	result := fetchUDP(context.Background(), "udp://"+listener.LocalAddr().String()+"/hello%20udp")
+	if result.Error != "" || result.StatusCode != 200 || result.Body != "worker-a:hello udp" {
+		t.Fatalf("UDP fetch = %#v", result)
+	}
+}
+
+func TestDiagnosticBufferIsBounded(t *testing.T) {
+	buffer := &diagnosticBuffer{remaining: 4}
+	if written, err := buffer.Write([]byte("abcdef")); err != nil || written != 6 {
+		t.Fatalf("Write = %d, %v", written, err)
+	}
+	if got := buffer.String(); got != "abcd\n[output truncated]" {
+		t.Fatalf("buffer = %q", got)
+	}
+}
+
+func TestMissingDiagnosticCommandIsExplicit(t *testing.T) {
+	result := runDiagnosticCommand([]string{"/definitely/not/present"})
+	if result.ExitCode != -1 || !strings.Contains(result.Error, "unavailable") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestTrackedExecutablesAreExactAndBounded(t *testing.T) {
+	tracked, err := parseTrackedExecutables([]string{"nginx=/usr/sbin/nginx", "worker=/opt/bin/worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tracked, map[string]string{"/usr/sbin/nginx": "nginx", "/opt/bin/worker": "worker"}) {
+		t.Fatalf("tracked = %#v", tracked)
+	}
+	for _, values := range [][]string{
+		{"nginx=usr/sbin/nginx"},
+		{"bad name=/bin/app"},
+		{"a=/bin/app", "b=/bin/app"},
+		{"a=/bin/a", "a=/bin/b"},
+	} {
+		if _, err := parseTrackedExecutables(values); err == nil {
+			t.Fatalf("invalid tracked executable accepted: %#v", values)
 		}
 	}
 }

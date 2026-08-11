@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,11 +27,12 @@ import (
 )
 
 const (
-	maxBodyBytes    = 64 << 10
-	maxFileBytes    = 32 << 10
-	maxEvents       = 2048
-	observerHeader  = "X-Sandcamp-E2E-Token"
-	defaultObserver = "http://127.0.0.1:18080"
+	maxBodyBytes      = 64 << 10
+	maxFileBytes      = 32 << 10
+	maxNetfilterBytes = 128 << 10
+	maxEvents         = 2048
+	observerHeader    = "X-Sandcamp-E2E-Token"
+	defaultObserver   = "http://127.0.0.1:18080"
 )
 
 type repeatedFlag []string
@@ -46,6 +48,7 @@ type serveOptions struct {
 	Name            string
 	Listen          string
 	ExtraListen     repeatedFlag
+	UDPListen       string
 	ProbePath       string
 	ObserverURL     string
 	ReadyDelay      time.Duration
@@ -58,6 +61,7 @@ type serveOptions struct {
 	ChildIgnoreTerm bool
 	Writes          repeatedFlag
 	FetchOnStart    repeatedFlag
+	TrackExecutable repeatedFlag
 }
 
 type bootstrapOptions struct {
@@ -275,6 +279,7 @@ func parseServeOptions(arguments []string, observer bool) serveOptions {
 	set.StringVar(&options.Name, "name", os.Getenv(model.NameEnvironment), "process name")
 	set.StringVar(&options.Listen, "listen", "127.0.0.1:0", "HTTP listen address")
 	set.Var(&options.ExtraListen, "extra-listen", "additional HTTP listen address (repeatable)")
+	set.StringVar(&options.UDPListen, "udp-listen", "", "optional UDP echo listen address")
 	set.StringVar(&options.ProbePath, "probe-path", "/healthz", "readiness probe path")
 	set.StringVar(&options.ObserverURL, "observer-url", defaultObserver, "observer base URL")
 	set.DurationVar(&options.ReadyDelay, "ready-delay", 0, "delay before the probe succeeds")
@@ -287,6 +292,7 @@ func parseServeOptions(arguments []string, observer bool) serveOptions {
 	set.BoolVar(&options.ChildIgnoreTerm, "child-ignore-term", false, "make the spawned child ignore termination")
 	set.Var(&options.Writes, "write", "write PATH=VALUE before serving (repeatable)")
 	set.Var(&options.FetchOnStart, "fetch-on-start", "fetch URL after startup (repeatable)")
+	set.Var(&options.TrackExecutable, "track-executable", "observer-only NAME=/absolute/executable mapping (repeatable)")
 	if err := set.Parse(arguments); err != nil || set.NArg() != 0 {
 		fatal("invalid arguments")
 	}
@@ -305,6 +311,13 @@ func parseServeOptions(arguments []string, observer bool) serveOptions {
 func runServer(options serveOptions) error {
 	runID := os.Getenv(model.RunIDEnvironment)
 	token := os.Getenv(model.TokenEnvironment)
+	tracked, err := parseTrackedExecutables(options.TrackExecutable)
+	if err != nil {
+		return err
+	}
+	if !options.Observer && len(tracked) != 0 {
+		return errors.New("track-executable is observer-only")
+	}
 	startedAt := time.Now().UTC()
 	for _, declaration := range options.Writes {
 		if err := writeFixtureFile(declaration); err != nil {
@@ -319,6 +332,11 @@ func runServer(options serveOptions) error {
 	defer listener.Close()
 
 	store := &eventStore{}
+	var initialNetfilter *model.NetfilterSnapshot
+	if options.Observer {
+		captured := captureNetfilter()
+		initialNetfilter = &captured
+	}
 	var forcedUnhealthy atomic.Bool
 	probeWasReady := false
 	probeMu := sync.Mutex{}
@@ -417,11 +435,11 @@ func runServer(options serveOptions) error {
 			http.Error(response, "invalid target", http.StatusBadRequest)
 			return
 		}
-		writeJSON(response, fetchURL(request.Context(), target), nil)
+		writeJSON(response, fetchTarget(request.Context(), target), nil)
 	})
 
 	if options.Observer {
-		installObserverHandlers(mux, store, runID, token)
+		installObserverHandlers(mux, store, runID, token, initialNetfilter, tracked)
 	}
 
 	server := &http.Server{
@@ -447,16 +465,30 @@ func runServer(options serveOptions) error {
 			}
 		}(current)
 	}
+	var udpListener *net.UDPConn
+	if options.UDPListen != "" {
+		address, resolveErr := net.ResolveUDPAddr("udp4", options.UDPListen)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve UDP listen %s: %w", options.UDPListen, resolveErr)
+		}
+		udpListener, err = net.ListenUDP("udp4", address)
+		if err != nil {
+			return fmt.Errorf("listen UDP %s: %w", options.UDPListen, err)
+		}
+		defer udpListener.Close()
+		go serveUDP(udpListener, options.Name, event, serverErrors)
+	}
 
 	event("started", map[string]any{
 		"address":         listener.Addr().String(),
 		"extra_addresses": append([]string(nil), options.ExtraListen...),
+		"udp_address":     options.UDPListen,
 		"cwd":             mustGetwd(),
 		"uid":             os.Getuid(),
 		"gid":             os.Getgid(),
 	})
 	for _, value := range options.FetchOnStart {
-		result := fetchURL(context.Background(), value)
+		result := fetchTarget(context.Background(), value)
 		event("startup-fetch", map[string]any{"result": result})
 	}
 	if options.Spawn != "" {
@@ -497,7 +529,7 @@ func runServer(options serveOptions) error {
 	}
 }
 
-func installObserverHandlers(mux *http.ServeMux, store *eventStore, runID, token string) {
+func installObserverHandlers(mux *http.ServeMux, store *eventStore, runID, token string, initialNetfilter *model.NetfilterSnapshot, tracked map[string]string) {
 	mux.HandleFunc("/v1/events", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || !authorized(request, token) {
 			http.Error(response, "unauthorized", http.StatusUnauthorized)
@@ -518,12 +550,14 @@ func installObserverHandlers(mux *http.ServeMux, store *eventStore, runID, token
 			http.Error(response, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		processes, err := scanRun(runID)
+		processes, err := scanRunWithExecutables(runID, tracked)
 		writeJSON(response, model.Snapshot{
-			ObservedAt: time.Now().UTC(),
-			RunID:      runID,
-			Events:     store.copy(),
-			Processes:  processes,
+			ObservedAt:       time.Now().UTC(),
+			RunID:            runID,
+			Events:           store.copy(),
+			Processes:        processes,
+			InitialNetfilter: initialNetfilter,
+			Netfilter:        netfilterPointer(captureNetfilter()),
 		}, err)
 	})
 	mux.HandleFunc("/v1/file", func(response http.ResponseWriter, request *http.Request) {
@@ -576,6 +610,30 @@ func installObserverHandlers(mux *http.ServeMux, store *eventStore, runID, token
 			"body":        string(body),
 		}, err)
 	})
+	mux.HandleFunc("/v1/signal", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || !authorized(request, token) {
+			http.Error(response, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var input struct {
+			Process string `json:"process"`
+			Signal  string `json:"signal"`
+		}
+		if err := decodeRequestBody(request, &input); err != nil {
+			http.Error(response, "invalid request", http.StatusBadRequest)
+			return
+		}
+		pid, signal, err := resolveSignalTarget(runID, input.Process, input.Signal, tracked)
+		if err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := syscall.Kill(pid, signal); err != nil {
+			writeJSON(response, nil, err)
+			return
+		}
+		writeJSON(response, map[string]any{"accepted": true, "pid": pid, "signal": input.Signal}, nil)
+	})
 }
 
 type fetchInput struct {
@@ -586,7 +644,7 @@ type fetchInput struct {
 }
 
 func (input fetchInput) target() (string, error) {
-	if input.Scheme != "http" && input.Scheme != "https" {
+	if input.Scheme != "http" && input.Scheme != "https" && input.Scheme != "udp" {
 		return "", errors.New("unsupported scheme")
 	}
 	host := input.Host
@@ -595,7 +653,7 @@ func (input fetchInput) target() (string, error) {
 	} else if host == "" || strings.ContainsAny(host, "/:@[] \t\r\n") {
 		return "", errors.New("invalid host")
 	}
-	if input.Port < 0 || input.Port > 65535 {
+	if input.Port < 0 || input.Port > 65535 || input.Scheme == "udp" && input.Port == 0 {
 		return "", errors.New("invalid port")
 	}
 	if input.Path == "" {
@@ -608,6 +666,60 @@ func (input fetchInput) target() (string, error) {
 		host = net.JoinHostPort(host, strconv.Itoa(input.Port))
 	}
 	return input.Scheme + "://" + host + input.Path, nil
+}
+
+func fetchTarget(ctx context.Context, target string) model.FetchResult {
+	if strings.HasPrefix(target, "udp://") {
+		return fetchUDP(ctx, target)
+	}
+	return fetchURL(ctx, target)
+}
+
+func fetchUDP(ctx context.Context, target string) model.FetchResult {
+	result := model.FetchResult{URL: target}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	address, err := net.ResolveUDPAddr("udp4", parsed.Host)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	connection, err := net.DialUDP("udp4", nil, address)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	if contextDeadline, found := ctx.Deadline(); found && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	payload, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/"))
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if payload == "" || len(payload) > 1024 {
+		result.Error = "UDP payload must contain 1-1024 bytes"
+		return result
+	}
+	if _, err := connection.Write([]byte(payload)); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	buffer := make([]byte, 2048)
+	length, err := connection.Read(buffer)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.StatusCode = http.StatusOK
+	result.Body = string(buffer[:length])
+	return result
 }
 
 func decodeRequestBody(request *http.Request, target any) error {
@@ -648,6 +760,10 @@ func postEvent(observerURL, token string, event model.Event) {
 }
 
 func scanRun(runID string) ([]model.Process, error) {
+	return scanRunWithExecutables(runID, nil)
+}
+
+func scanRunWithExecutables(runID string, tracked map[string]string) ([]model.Process, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
@@ -659,11 +775,16 @@ func scanRun(runID string) ([]model.Process, error) {
 			continue
 		}
 		environment, readErr := readProcessEnvironment(pid)
-		if readErr != nil || environment[model.RunIDEnvironment] != runID {
+		belongsToRun := readErr == nil && environment[model.RunIDEnvironment] == runID
+		trackedName := tracked[readLink(filepath.Join("/proc", entry.Name(), "exe"))]
+		if !belongsToRun && trackedName == "" {
 			continue
 		}
-		process, scanErr := scanProcess(pid, runID)
+		process, scanErr := scanProcess(pid, "")
 		if scanErr == nil {
+			if !belongsToRun {
+				process.Name = trackedName
+			}
 			processes = append(processes, process)
 		}
 	}
@@ -674,6 +795,27 @@ func scanRun(runID string) ([]model.Process, error) {
 		return processes[left].Name < processes[right].Name
 	})
 	return processes, nil
+}
+
+func parseTrackedExecutables(values []string) (map[string]string, error) {
+	result := make(map[string]string, len(values))
+	names := make(map[string]struct{}, len(values))
+	for _, declaration := range values {
+		name, path, found := strings.Cut(declaration, "=")
+		if !found || name == "" || strings.ContainsAny(name, "/= \t\r\n") ||
+			!filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, fmt.Errorf("invalid tracked executable %q", declaration)
+		}
+		if _, duplicate := result[path]; duplicate {
+			return nil, fmt.Errorf("tracked executable path %q is duplicated", path)
+		}
+		if _, duplicate := names[name]; duplicate {
+			return nil, fmt.Errorf("tracked executable name %q is duplicated", name)
+		}
+		result[path] = name
+		names[name] = struct{}{}
+	}
+	return result, nil
 }
 
 func scanProcess(pid int, runID string) (model.Process, error) {
@@ -898,6 +1040,145 @@ func fetchURL(ctx context.Context, value string) model.FetchResult {
 	}
 	result.Body = string(body)
 	return result
+}
+
+func serveUDP(listener *net.UDPConn, name string, event func(string, map[string]any), serverErrors chan<- error) {
+	buffer := make([]byte, 2048)
+	for {
+		length, peer, err := listener.ReadFromUDP(buffer)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			select {
+			case serverErrors <- err:
+			default:
+			}
+			return
+		}
+		response := name + ":" + string(buffer[:length])
+		if _, err := listener.WriteToUDP([]byte(response), peer); err != nil {
+			select {
+			case serverErrors <- err:
+			default:
+			}
+			return
+		}
+		event("udp-datagram", map[string]any{"bytes": length, "peer": peer.IP.String()})
+	}
+}
+
+func netfilterPointer(value model.NetfilterSnapshot) *model.NetfilterSnapshot { return &value }
+
+func captureNetfilter() model.NetfilterSnapshot {
+	return model.NetfilterSnapshot{
+		IPTablesSave: runDiagnosticCommand(
+			[]string{"/sbin/iptables-save", "/usr/sbin/iptables-save", "/usr/local/sbin/iptables-save"},
+		),
+		NFTListRules: runDiagnosticCommand(
+			[]string{"/sbin/nft", "/usr/sbin/nft", "/usr/local/sbin/nft"},
+			"list", "ruleset",
+		),
+	}
+}
+
+type diagnosticBuffer struct {
+	contents  bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (buffer *diagnosticBuffer) Write(value []byte) (int, error) {
+	original := len(value)
+	if len(value) > buffer.remaining {
+		value = value[:buffer.remaining]
+		buffer.truncated = true
+	}
+	if len(value) > 0 {
+		_, _ = buffer.contents.Write(value)
+		buffer.remaining -= len(value)
+	}
+	return original, nil
+}
+
+func (buffer *diagnosticBuffer) String() string {
+	value := buffer.contents.String()
+	if buffer.truncated {
+		value += "\n[output truncated]"
+	}
+	return value
+}
+
+func runDiagnosticCommand(candidates []string, arguments ...string) model.CommandResult {
+	path := ""
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		return model.CommandResult{ExitCode: -1, Error: "diagnostic executable is unavailable"}
+	}
+	result := model.CommandResult{Command: append([]string{path}, arguments...), ExitCode: 0}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stdout := &diagnosticBuffer{remaining: maxNetfilterBytes}
+	stderr := &diagnosticBuffer{remaining: maxBodyBytes}
+	command := exec.CommandContext(ctx, path, arguments...)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	result.Output = stdout.String()
+	if err != nil {
+		result.ExitCode = -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			result.ExitCode = exitErr.ExitCode()
+		}
+		result.Error = err.Error()
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			result.Error += ": " + detail
+		}
+	}
+	if ctx.Err() != nil {
+		result.Error = ctx.Err().Error()
+	}
+	return result
+}
+
+func resolveSignalTarget(runID, processName, signalName string, tracked map[string]string) (int, syscall.Signal, error) {
+	if processName == "" {
+		return 0, 0, errors.New("process is required")
+	}
+	var signal syscall.Signal
+	switch strings.ToUpper(signalName) {
+	case "TERM", "SIGTERM":
+		signal = syscall.SIGTERM
+	case "KILL", "SIGKILL":
+		signal = syscall.SIGKILL
+	default:
+		return 0, 0, errors.New("only TERM and KILL are supported")
+	}
+	processes, err := scanRunWithExecutables(runID, tracked)
+	if err != nil {
+		return 0, 0, err
+	}
+	pid := 0
+	for _, process := range processes {
+		if process.Name != processName {
+			continue
+		}
+		if pid != 0 {
+			return 0, 0, errors.New("process name is not unique")
+		}
+		pid = process.PID
+	}
+	if pid == 0 {
+		return 0, 0, errors.New("process not found")
+	}
+	return pid, signal, nil
 }
 
 func spawnChild(options serveOptions, event func(string, map[string]any)) error {

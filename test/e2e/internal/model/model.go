@@ -43,10 +43,27 @@ type Process struct {
 
 // Snapshot is the observer's complete, bounded view of one scenario.
 type Snapshot struct {
-	ObservedAt time.Time `json:"observed_at"`
-	RunID      string    `json:"run_id"`
-	Events     []Event   `json:"events"`
-	Processes  []Process `json:"processes"`
+	ObservedAt       time.Time          `json:"observed_at"`
+	RunID            string             `json:"run_id"`
+	Events           []Event            `json:"events"`
+	Processes        []Process          `json:"processes"`
+	InitialNetfilter *NetfilterSnapshot `json:"initial_netfilter,omitempty"`
+	Netfilter        *NetfilterSnapshot `json:"netfilter,omitempty"`
+}
+
+// NetfilterSnapshot captures bounded, test-only diagnostics from the shared
+// network namespace. Production runtime images do not contain these tools.
+type NetfilterSnapshot struct {
+	IPTablesSave CommandResult `json:"iptables_save"`
+	NFTListRules CommandResult `json:"nft_list_ruleset"`
+}
+
+// CommandResult is deliberately bounded before it is added to E2E evidence.
+type CommandResult struct {
+	Command  []string `json:"command,omitempty"`
+	Output   string   `json:"output,omitempty"`
+	Error    string   `json:"error,omitempty"`
+	ExitCode int      `json:"exit_code"`
 }
 
 // FileResult records a file read through /proc/<pid>/root. This lets the

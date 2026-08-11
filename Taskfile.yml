@@ -72,6 +72,7 @@ tasks:
       - docker build --platform linux/amd64 -t sandcamp-e2e-agent:alpine-local -f test/e2e/images/agent-alpine/Dockerfile .
       - docker build --platform linux/amd64 -t sandcamp-e2e-agent:glibc-local -f test/e2e/images/agent-glibc/Dockerfile .
       - docker build --platform linux/amd64 -t sandcamp-runtime:e2e-local -f test/e2e/images/runtime/Dockerfile .
+      - docker build --platform linux/amd64 -t sandcamp-e2e-nginx:local test/image-volume/nginx
 
   e2e:list:
     desc: 列出云端回归场景（不访问云 API）
