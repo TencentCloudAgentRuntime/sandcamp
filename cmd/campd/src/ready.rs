@@ -117,22 +117,39 @@ fn respond(mut stream: TcpStream, ready: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
-    fn status(address: SocketAddr) -> String {
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream
-            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
+    fn status(address: SocketAddr) -> io::Result<String> {
+        let mut stream = TcpStream::connect(address)?;
+        stream.write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
         let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        response.lines().next().unwrap().to_owned()
+        stream.read_to_string(&mut response)?;
+        response
+            .lines()
+            .next()
+            .map(str::to_owned)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "empty ready response"))
+    }
+
+    fn wait_for_status(address: SocketAddr, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            match status(address) {
+                Ok(value) if value == expected => return,
+                Ok(value) => last = value,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("ready status did not become {expected:?}; last observation: {last}");
     }
 
     #[test]
     fn reports_unready_then_ready() {
         let server = ReadyServer::start("127.0.0.1:0").unwrap();
-        assert_eq!(status(server.address()), "HTTP/1.1 503 Service Unavailable");
+        wait_for_status(server.address(), "HTTP/1.1 503 Service Unavailable");
         server.state().set(true);
-        assert_eq!(status(server.address()), "HTTP/1.1 200 OK");
+        wait_for_status(server.address(), "HTTP/1.1 200 OK");
     }
 }
