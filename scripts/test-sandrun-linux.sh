@@ -234,7 +234,7 @@ docker run --rm --platform linux/amd64 --privileged \
   -v "$state_volume:/state" \
   -v "$overlay_volume:/var/lib/sandcamp/overlay" \
   "$DEBIAN_IMAGE" \
-  /sandrun --rootfs /rootfs --uid 0 --gid 0 \
+  /sandrun --rootfs /rootfs --standard-mounts --uid 0 --gid 0 \
   --bind /state/root-output /mnt -- \
   /bin/sh -c 'grep -E "^(Uid|Gid|Groups|CapEff|NoNewPrivs):" /proc/self/status > /mnt/identity'
 root_identity=$(
