@@ -37,6 +37,15 @@ func TestRenderMountsOwnsImageVolumePaths(t *testing.T) {
 	}
 }
 
+func TestImageRegistryTypesMatchAGSValues(t *testing.T) {
+	if got := string(ImageRegistryPersonal); got != "personal" {
+		t.Fatalf("personal registry type = %q", got)
+	}
+	if got := string(ImageRegistryEnterprise); got != "enterprise" {
+		t.Fatalf("enterprise registry type = %q", got)
+	}
+}
+
 func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 	configuration, err := RenderStart(referenceImages(), referenceSpec())
 	if err != nil {
@@ -321,14 +330,14 @@ func TestRenderMountsRejectsInvalidImages(t *testing.T) {
 		{
 			SandcampRuntime: Image{
 				Reference:         "runtime",
-				ImageRegistryType: "public",
+				ImageRegistryType: ImageRegistryType("public"),
 			},
 		},
 		{
 			SandcampRuntime: referenceImages().SandcampRuntime,
 			Sidecars: []SidecarImage{
-				{Name: "api", Reference: "api:1", ImageRegistryType: "personal"},
-				{Name: "api", Reference: "api:2", ImageRegistryType: "personal"},
+				{Name: "api", Reference: "api:1", ImageRegistryType: ImageRegistryPersonal},
+				{Name: "api", Reference: "api:2", ImageRegistryType: ImageRegistryPersonal},
 			},
 		},
 	}
@@ -359,18 +368,18 @@ func referenceImages() ImageSet {
 	return ImageSet{
 		SandcampRuntime: Image{
 			Reference:         "ccr.example.com/team/runtime@sha256:runtime",
-			ImageRegistryType: "personal",
+			ImageRegistryType: ImageRegistryPersonal,
 		},
 		Sidecars: []SidecarImage{
 			{
 				Name:              "egress",
 				Reference:         "ccr.example.com/team/egress@sha256:egress",
-				ImageRegistryType: "personal",
+				ImageRegistryType: ImageRegistryPersonal,
 			},
 			{
 				Name:              "fastapi",
 				Reference:         "ccr.example.com/team/fastapi@sha256:fastapi",
-				ImageRegistryType: "personal",
+				ImageRegistryType: ImageRegistryPersonal,
 			},
 		},
 	}

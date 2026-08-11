@@ -25,7 +25,7 @@ type Images struct {
 	Nginx        string
 	Envd         string
 	Main         string
-	RegistryType string
+	RegistryType sandcamp.ImageRegistryType
 }
 
 type ExpectedState string

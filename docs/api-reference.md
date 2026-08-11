@@ -32,7 +32,7 @@ toolRequest.StorageMounts = append(toolRequest.StorageMounts, mounts...)
 
 toolConfiguration := *configuration
 toolConfiguration.Image = &mainImage
-toolConfiguration.ImageRegistryType = &registryType
+toolConfiguration.ImageRegistryType = common.StringPtr(string(registryType))
 toolRequest.CustomConfiguration = &toolConfiguration
 
 startRequest.CustomConfiguration = configuration
@@ -47,15 +47,22 @@ Resources 等 Tool 字段。Instance 继承 Tool 的 `StorageMounts`。
 ## 镜像声明
 
 ```go
+type ImageRegistryType string
+
+const (
+    ImageRegistryPersonal   ImageRegistryType = "personal"
+    ImageRegistryEnterprise ImageRegistryType = "enterprise"
+)
+
 type Image struct {
     Reference         string
-    ImageRegistryType string
+    ImageRegistryType ImageRegistryType
 }
 
 type SidecarImage struct {
     Name              string
     Reference         string
-    ImageRegistryType string
+    ImageRegistryType ImageRegistryType
 }
 
 type ImageSet struct {
@@ -67,7 +74,11 @@ type ImageSet struct {
 `ImageSet` 只描述 Image Volume；AGS 主镜像仍配置在 Tool 的
 `CustomConfiguration.Image`。
 
-- `ImageRegistryType` 支持 `personal` 和 `enterprise`；
+- `ImageRegistryPersonal` 的 AGS 值是 `personal`，对应腾讯云 CCR 个人版；
+- `ImageRegistryEnterprise` 的 AGS 值是 `enterprise`，对应腾讯云 TCR 企业版；
+- Runtime 和 Sidecar 的 `Reference` 必须指向所选类型的腾讯云 Registry；
+- GHCR 等通用 OCI Registry 不能直接作为 AGS Image Volume，使用前需要把镜像同步到
+  调用方自己的 CCR 或 TCR；
 - Sidecar `Name` 必须符合进程名称规则且不可重复；
 - Sidecar `Name` 必须与对应的 `Process.Name` 一致；
 - 当前一个 Sidecar Image 声明对应一个 Sidecar Process；

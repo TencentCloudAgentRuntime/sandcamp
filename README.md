@@ -9,9 +9,11 @@ Sandcamp 是一个用于 AGS 的进程编排 SDK。它让一个沙箱同时运�
 主镜像不需要包含 `campd` 或 `sandrun`。这两个静态二进制由单独的 Runtime Image
 Volume 提供。
 
-当前预发布 Runtime Image 为 `ghcr.io/csjgg/sandcamp-runtime:beta`，仅支持
-`linux/amd64`。`beta` 是可变标签；需要固定内容时使用
-`ghcr.io/csjgg/sandcamp-runtime:sha-<完整 Git Commit>` 或镜像 Digest。
+CI 将 `linux/amd64` 预发布构建产物保存为
+`ghcr.io/csjgg/sandcamp-runtime:beta`。AGS Image Volume 当前不能直接从 GHCR
+拉取；使用前必须把该 Runtime 镜像同步到调用方自己的腾讯云 CCR 或 TCR。`beta` 是
+可变标签；需要固定内容时，先选择 `sha-<完整 Git Commit>` 或 Digest，再同步到目标
+Registry。
 
 [完整 Cookbook](examples/cookbook/main.go) ·
 [API 参考](docs/api-reference.md) ·
@@ -28,9 +30,32 @@ Volume 提供。
 go get github.com/csjgg/sandcamp@<commit>
 ```
 
+先把 Runtime 镜像同步到 AGS 能访问的 Registry。例如使用 CCR：
+
+```bash
+docker pull ghcr.io/csjgg/sandcamp-runtime:beta
+docker tag \
+  ghcr.io/csjgg/sandcamp-runtime:beta \
+  ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
+docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
+```
+
+TCR 使用对应实例的 Registry 地址。主镜像与 Sidecar 镜像同样需要位于 AGS 支持的
+Registry。Sandcamp 对 AGS 的两种 Image Registry 类型提供了明确常量：
+
+| SDK 常量 | AGS 值 | Registry |
+| --- | --- | --- |
+| `sandcamp.ImageRegistryPersonal` | `personal` | 腾讯云 CCR 个人版 |
+| `sandcamp.ImageRegistryEnterprise` | `enterprise` | 腾讯云 TCR 企业版 |
+
+GHCR 仅作为构建产物的分发来源，不能填写到 `Image.Reference` 后再标记为 `personal`
+或 `enterprise`。
+
 先声明 Runtime、Sidecar 镜像和进程：
 
 ```go
+registryType := sandcamp.ImageRegistryPersonal // 企业版使用 ImageRegistryEnterprise
+
 images := sandcamp.ImageSet{
     SandcampRuntime: sandcamp.Image{
         Reference:         runtimeImage,
@@ -93,7 +118,7 @@ toolRequest.StorageMounts = append(toolRequest.StorageMounts, mounts...)
 
 toolConfiguration := *configuration
 toolConfiguration.Image = &mainImage
-toolConfiguration.ImageRegistryType = &registryType
+toolConfiguration.ImageRegistryType = common.StringPtr(string(registryType))
 toolRequest.CustomConfiguration = &toolConfiguration
 
 startRequest.CustomConfiguration = configuration
@@ -103,6 +128,16 @@ startRequest.CustomConfiguration = configuration
 AGS custom Tool 要求默认 `Command` 和 `Probe`，所以 Tool 与 Instance 都使用
 `RenderStart` 的结果。Tool 的副本再补充主镜像和资源配置。完整、直接发送请求的
 代码见 [`examples/cookbook/main.go`](examples/cookbook/main.go)。
+
+运行 Cookbook 时从示例配置创建本地 `.env`：
+
+```bash
+cp examples/cookbook/.env.example examples/cookbook/.env
+# 编辑 examples/cookbook/.env
+go run ./examples/cookbook
+```
+
+真实 `.env` 已被 Git 忽略；进程已有的环境变量优先于文件中的同名值。
 
 ## 运行原理
 

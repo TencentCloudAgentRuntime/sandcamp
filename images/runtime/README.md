@@ -3,10 +3,10 @@
 这里提供 Sandcamp Runtime Image Volume 的构建定义。它与 `test/image-volume`
 中的集成测试镜像分开维护。
 
-## Beta 镜像
+## Beta 构建产物
 
 `main` 分支的完整 CI 通过后，会把经过 Linux 集成测试的同一份 Runtime 二进制
-打包并发布到 GitHub Container Registry：
+打包并保存到 GitHub Container Registry：
 
 ```text
 ghcr.io/csjgg/sandcamp-runtime:beta
@@ -16,8 +16,21 @@ ghcr.io/csjgg/sandcamp-runtime:sha-<完整 Git Commit>
 `beta` 会随每次成功构建移动，适合试用。需要固定运行内容时，使用 `sha-...`
 标签或镜像 Digest。当前只构建 `linux/amd64`，不会发布 `latest`。
 
-GHCR 包首次生成后，需要仓库维护者在 Package Settings 中确认可见性；对外直接拉取
-时应将该 Package 设为 Public。
+GHCR 是构建产物的分发来源，不是 AGS Image Volume 当前支持的 Registry。AGS 的
+Runtime/Sidecar Image Volume 只支持腾讯云 CCR（`personal`）和 TCR
+（`enterprise`）。使用前需要把镜像同步到调用方自己的 CCR 或 TCR，例如：
+
+```bash
+docker pull ghcr.io/csjgg/sandcamp-runtime:beta
+docker tag \
+  ghcr.io/csjgg/sandcamp-runtime:beta \
+  ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
+docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
+```
+
+需要可复现部署时，应同步 `sha-<完整 Git Commit>` 标签或固定 Digest，而不是可变的
+`beta` 标签。GHCR 包首次生成后，还需要仓库维护者在 Package Settings 中确认其读取
+可见性。
 
 ## 本地构建
 

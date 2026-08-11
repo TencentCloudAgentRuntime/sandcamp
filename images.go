@@ -9,6 +9,16 @@ import (
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 
+// ImageRegistryType identifies the registry mode AGS uses to pull an image.
+type ImageRegistryType string
+
+const (
+	// ImageRegistryPersonal selects the AGS personal registry mode.
+	ImageRegistryPersonal ImageRegistryType = "personal"
+	// ImageRegistryEnterprise selects the AGS enterprise registry mode.
+	ImageRegistryEnterprise ImageRegistryType = "enterprise"
+)
+
 const (
 	sandcampRuntimeMountName = "sandcamp-runtime"
 	sandcampRuntimeMountPath = "/mnt/sandcamp"
@@ -25,7 +35,7 @@ var (
 // Image identifies the Sandcamp Runtime image mounted into every sandbox.
 type Image struct {
 	Reference         string
-	ImageRegistryType string
+	ImageRegistryType ImageRegistryType
 }
 
 // SidecarImage identifies one OCI image whose root filesystem is mounted as an
@@ -33,7 +43,7 @@ type Image struct {
 type SidecarImage struct {
 	Name              string
 	Reference         string
-	ImageRegistryType string
+	ImageRegistryType ImageRegistryType
 }
 
 // ImageSet contains only images mounted as Image Volumes. The user's main
@@ -47,7 +57,7 @@ type resolvedImage struct {
 	mountName         string
 	mountPath         string
 	reference         string
-	imageRegistryType string
+	imageRegistryType ImageRegistryType
 }
 
 type resolvedImageSet struct {
@@ -115,13 +125,13 @@ func resolveImageSet(images ImageSet) (resolvedImageSet, error) {
 	return result, nil
 }
 
-func validateImage(label, reference, registryType string) error {
+func validateImage(label, reference string, registryType ImageRegistryType) error {
 	if reference == "" ||
 		reference != strings.TrimSpace(reference) ||
 		strings.ContainsRune(reference, '\x00') {
 		return fmt.Errorf("%w: %s reference is invalid", ErrInvalidImage, label)
 	}
-	if registryType != "personal" && registryType != "enterprise" {
+	if registryType != ImageRegistryPersonal && registryType != ImageRegistryEnterprise {
 		return fmt.Errorf("%w: %s registry type is invalid", ErrInvalidImage, label)
 	}
 	return nil
@@ -135,7 +145,7 @@ func storageMount(image resolvedImage) *ags.StorageMount {
 		StorageSource: &ags.StorageSource{
 			Image: &ags.ImageStorageSource{
 				Reference:         stringPointer(image.reference),
-				ImageRegistryType: stringPointer(image.imageRegistryType),
+				ImageRegistryType: stringPointer(string(image.imageRegistryType)),
 			},
 		},
 	}

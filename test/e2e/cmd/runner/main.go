@@ -266,7 +266,7 @@ func loadEnvironment() (environment, error) {
 			Nginx:        get("SANDCAMP_E2E_NGINX_IMAGE"),
 			Envd:         get("SANDCAMP_E2E_ENVD_IMAGE"),
 			Main:         get("SANDCAMP_E2E_MAIN_IMAGE"),
-			RegistryType: registryType,
+			RegistryType: sandcamp.ImageRegistryType(registryType),
 		},
 	}, nil
 }
@@ -376,7 +376,7 @@ func (r *runner) createTool(defaultScenario scenario.Scenario) error {
 			ReadOnly:  boolPointer(true),
 			StorageSource: &ags.StorageSource{Image: &ags.ImageStorageSource{
 				Reference:         stringPointer(r.env.Images.Envd),
-				ImageRegistryType: stringPointer(r.env.Images.RegistryType),
+				ImageRegistryType: stringPointer(string(r.env.Images.RegistryType)),
 				SubPath:           stringPointer("/usr/bin/envd"),
 			}},
 		})
@@ -386,7 +386,7 @@ func (r *runner) createTool(defaultScenario scenario.Scenario) error {
 		return fmt.Errorf("render tool start: %w", err)
 	}
 	configuration.Image = stringPointer(mainImage(defaultScenario, r.env.Images))
-	configuration.ImageRegistryType = stringPointer(r.env.Images.RegistryType)
+	configuration.ImageRegistryType = stringPointer(string(r.env.Images.RegistryType))
 	configuration.Resources = &ags.ResourceConfiguration{CPU: stringPointer("2"), Memory: stringPointer("4Gi")}
 	request := toolCreateRequest{
 		ToolName:             "sandcamp-e2e-" + strings.TrimPrefix(r.report.RunID, "run-"),
@@ -434,7 +434,7 @@ func (r *runner) runScenario(item scenario.Scenario) (result scenarioResult) {
 		item.Configure(configuration, result.RunID, token)
 	}
 	configuration.Image = stringPointer(mainImage(item, r.env.Images))
-	configuration.ImageRegistryType = stringPointer(r.env.Images.RegistryType)
+	configuration.ImageRegistryType = stringPointer(string(r.env.Images.RegistryType))
 	response, err := r.agrJSON(r.ctx, instanceCreateRequest{
 		ToolID:              r.toolID,
 		Timeout:             "15m",

@@ -5,16 +5,15 @@
 //  3. 创建 custom Tool，等待其进入 ACTIVE；
 //  4. 使用同一份启动配置创建 Instance。
 //
-// 运行前需要准备与示例命令路径相符的主镜像、Runtime 镜像和 Sidecar 镜像，并设置：
+// AGS Image Volume 只能从腾讯云 CCR/TCR 拉取镜像。运行前先把 Sandcamp Runtime、
+// 主镜像和 Sidecar 镜像推送到自己的 CCR 或 TCR，并创建本地配置：
 //
-//	export TENCENTCLOUD_SECRET_ID=...
-//	export TENCENTCLOUD_SECRET_KEY=...
-//	export TENCENTCLOUD_REGION='<region>'
-//	export AGS_ROLE_ARN='<role-arn>'
-//	export SANDCAMP_MAIN_IMAGE='<main-image>'
-//	export SANDCAMP_RUNTIME_IMAGE='ghcr.io/csjgg/sandcamp-runtime:beta'
-//	export SANDCAMP_SIDECAR_IMAGE='<proxy-image>'
+//	cp examples/cookbook/.env.example examples/cookbook/.env
+//	# 编辑 examples/cookbook/.env
 //	go run ./examples/cookbook
+//
+// 程序自动读取 examples/cookbook/.env；已经存在的系统环境变量优先。真实 .env 已被
+// Git 忽略，不要把 Secret ID、Secret Key 或 Role ARN 提交到仓库。
 //
 // 程序会实际创建 Tool 并启动 Instance，只输出资源 ID，不等待 Instance 进入 RUNNING，
 // 也不自动清理。验证完成后需要显式停止 Instance 并删除 Tool。
@@ -28,12 +27,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"github.com/csjgg/sandcamp"
+	"github.com/joho/godotenv"
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -49,6 +50,10 @@ const (
 )
 
 func main() {
+	if err := godotenv.Load("examples/cookbook/.env"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Fatalf("load examples/cookbook/.env: %v", err)
+	}
+
 	required := []string{
 		"TENCENTCLOUD_SECRET_ID",
 		"TENCENTCLOUD_SECRET_KEY",
@@ -57,6 +62,7 @@ func main() {
 		"SANDCAMP_MAIN_IMAGE",
 		"SANDCAMP_RUNTIME_IMAGE",
 		"SANDCAMP_SIDECAR_IMAGE",
+		"SANDCAMP_IMAGE_REGISTRY_TYPE",
 	}
 	for _, name := range required {
 		if os.Getenv(name) == "" {
@@ -64,7 +70,9 @@ func main() {
 		}
 	}
 
-	const registryType = "personal"
+	// 为了让示例保持紧凑，主镜像、Runtime 和 Sidecar 使用同一种 Registry 类型。
+	// personal 对应 CCR；enterprise 对应 TCR。SDK 的每个 Image 字段也可以分别指定。
+	registryType := sandcamp.ImageRegistryType(os.Getenv("SANDCAMP_IMAGE_REGISTRY_TYPE"))
 	// 主镜像由 Tool.CustomConfiguration.Image 指定，不放入 ImageSet。
 	// ImageSet 只描述通过 Image Volume 挂载的 Sandcamp Runtime 和 Sidecar。
 	images := sandcamp.ImageSet{
@@ -144,7 +152,7 @@ func main() {
 		ReadOnly:  common.BoolPtr(true),
 		StorageSource: &ags.StorageSource{Image: &ags.ImageStorageSource{
 			Reference:         common.StringPtr(envdImage),
-			ImageRegistryType: common.StringPtr(registryType),
+			ImageRegistryType: common.StringPtr(string(sandcamp.ImageRegistryPersonal)),
 			SubPath:           common.StringPtr(envdSubPath),
 		}},
 	})
@@ -204,7 +212,7 @@ func main() {
 	// 的结果。复制一份后，再补充只属于 Tool 的主镜像和资源配置。
 	toolConfiguration := *configuration
 	toolConfiguration.Image = common.StringPtr(os.Getenv("SANDCAMP_MAIN_IMAGE"))
-	toolConfiguration.ImageRegistryType = common.StringPtr(registryType)
+	toolConfiguration.ImageRegistryType = common.StringPtr(string(registryType))
 	toolConfiguration.Resources = &ags.ResourceConfiguration{
 		CPU:    common.StringPtr("2"),
 		Memory: common.StringPtr("4Gi"),
