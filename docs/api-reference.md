@@ -2,10 +2,11 @@
 
 ## 安装
 
-首个版本发布前，使用确定的 Git Commit：
+仓库为 Private 时，先配置 GitHub 读取凭证和私有模块前缀，再引用精确版本：
 
 ```bash
-go get github.com/TencentCloudAgentRuntime/sandcamp@<commit>
+go env -w GOPRIVATE=github.com/TencentCloudAgentRuntime
+go get github.com/TencentCloudAgentRuntime/sandcamp@v0.1.0-beta
 ```
 
 ```go

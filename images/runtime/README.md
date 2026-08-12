@@ -3,20 +3,25 @@
 这里提供 Sandcamp Runtime Image Volume 的构建定义。它与 `test/image-volume`
 中的集成测试镜像分开维护。
 
-## Beta 构建产物
+## 发布产物
 
-组织仓库首次推送 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会执行完整
-回归，并把通过测试的同一份 Runtime 二进制打包保存到 GitHub Container Registry：
+推送 `vMAJOR.MINOR.PATCH[-PRERELEASE]` Git tag 后，CI 会执行完整回归，并把通过
+测试的同一份 Runtime 二进制打包保存到 GitHub Container Registry：
 
 ```text
-ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
 ghcr.io/tencentcloudagentruntime/sandcamp-runtime:<version>
 ghcr.io/tencentcloudagentruntime/sandcamp-runtime:sha-<完整 Git Commit>
 ```
 
-`beta` 只会随成功的 beta tag 构建移动。普通 `main` push、Pull Request 和手动 CI
-只执行验证，不发布镜像。需要固定运行内容时，使用版本标签、`sha-...` 标签或镜像
-Digest。当前只构建 `linux/amd64`，不会发布 `latest`。
+每次发布都会生成精确版本和 `sha-...` 标签。`beta` 只会随成功的 beta tag 构建
+移动；无预发布后缀的稳定版本会更新 `latest`。普通 `main` push、Pull Request 和手动
+CI 只执行验证，不发布镜像。需要固定运行内容时，使用版本标签、SHA 标签或镜像
+Digest。当前只构建 `linux/amd64`。
+
+```text
+预发布版本：ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
+稳定版本：  ghcr.io/tencentcloudagentruntime/sandcamp-runtime:latest
+```
 
 GHCR 是构建产物的分发来源，不是 AGS Image Volume 当前支持的 Registry。AGS 的
 Runtime/Sidecar Image Volume 只支持腾讯云 CCR（`personal`）和 TCR

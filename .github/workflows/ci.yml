@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v*-beta.*"
+      - "v*"
   pull_request:
     branches:
       - main
@@ -34,6 +34,45 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          if [[ "$VERSION" == "$version" || "$version" == *+* ]]; then
+            printf 'invalid release tag: %s\n' "$VERSION" >&2
+            exit 1
+          fi
+
+          core="${version%%-*}"
+          IFS='.' read -r -a core_parts <<< "$core"
+          if (( ${#core_parts[@]} != 3 )); then
+            printf 'release tag must be vMAJOR.MINOR.PATCH[-PRERELEASE]: %s\n' "$VERSION" >&2
+            exit 1
+          fi
+          for part in "${core_parts[@]}"; do
+            if [[ ! "$part" =~ ^(0|[1-9][0-9]*)$ ]]; then
+              printf 'invalid release number in tag: %s\n' "$VERSION" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$version" == *-* ]]; then
+            prerelease="${version#*-}"
+            if [[ -z "$prerelease" ]]; then
+              printf 'prerelease identifier must not be empty: %s\n' "$VERSION" >&2
+              exit 1
+            fi
+            IFS='.' read -r -a prerelease_parts <<< "$prerelease"
+            for part in "${prerelease_parts[@]}"; do
+              if [[ -z "$part" || ! "$part" =~ ^[0-9A-Za-z-]+$ || "$part" =~ ^0[0-9]+$ ]]; then
+                printf 'invalid prerelease identifier in tag: %s\n' "$VERSION" >&2
+                exit 1
+              fi
+            done
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -148,8 +187,7 @@ jobs:
         if: >-
           github.repository == 'TencentCloudAgentRuntime/sandcamp' &&
           github.event_name == 'push' &&
-          startsWith(github.ref, 'refs/tags/v') &&
-          contains(github.ref, '-beta.')
+          startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandcamp-runtime-linux-amd64
@@ -161,13 +199,12 @@ jobs:
           retention-days: 1
 
   publish-runtime:
-    name: Publish beta runtime image
+    name: Publish runtime image
     needs: linux-integration
     if: >-
       github.repository == 'TencentCloudAgentRuntime/sandcamp' &&
       github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/v') &&
-      contains(github.ref, '-beta.')
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -203,9 +240,10 @@ jobs:
           images: ghcr.io/tencentcloudagentruntime/sandcamp-runtime
           flavor: latest=false
           tags: |
-            type=raw,value=beta
             type=ref,event=tag
             type=sha,format=long,prefix=sha-
+            type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.title=Sandcamp runtime bundle
             org.opencontainers.image.description=campd, sandrun, and the restricted launcher for a Sandcamp Runtime Image Volume
@@ -227,10 +265,11 @@ jobs:
 
       - name: Record published image
         env:
-          IMAGE: ghcr.io/tencentcloudagentruntime/sandcamp-runtime
           DIGEST: ${{ steps.publish.outputs.digest }}
-          VERSION: ${{ github.ref_name }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
         run: |
-          printf '### Runtime beta published\n\n- `%s:beta`\n- `%s:%s`\n- `%s:sha-%s`\n- Digest: `%s`\n' \
-            "$IMAGE" "$IMAGE" "$VERSION" "$IMAGE" "$GITHUB_SHA" "$DIGEST" \
-            >> "$GITHUB_STEP_SUMMARY"
+          printf '### Runtime image published\n\n' >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r tag; do
+            printf -- '- `%s`\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$TAGS"
+          printf -- '- Digest: `%s`\n' "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
