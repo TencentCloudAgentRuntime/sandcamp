@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/csjgg/sandcamp"
-	"github.com/csjgg/sandcamp/internal/testwire"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp/internal/testwire"
 )
 
 func main() {

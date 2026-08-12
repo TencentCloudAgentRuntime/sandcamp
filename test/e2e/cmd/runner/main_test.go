@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/csjgg/sandcamp/test/e2e/internal/scenario"
+	"github.com/TencentCloudAgentRuntime/sandcamp/test/e2e/internal/scenario"
 )
 
 func TestLimitedWriterCapsCapturedOutputWithoutBreakingCommand(t *testing.T) {

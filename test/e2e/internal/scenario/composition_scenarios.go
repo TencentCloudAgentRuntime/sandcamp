@@ -3,8 +3,8 @@ package scenario
 import (
 	"time"
 
-	"github.com/csjgg/sandcamp"
-	"github.com/csjgg/sandcamp/test/e2e/internal/model"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp/test/e2e/internal/model"
 )
 
 func sidecarOnly() Scenario {

@@ -1,4 +1,4 @@
-module github.com/csjgg/sandcamp
+module github.com/TencentCloudAgentRuntime/sandcamp
 
 go 1.24.0
 

@@ -3,7 +3,7 @@ package scenario
 import (
 	"time"
 
-	"github.com/csjgg/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
 )
 
 func missingNamedUser() Scenario {

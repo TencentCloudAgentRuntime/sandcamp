@@ -5,11 +5,11 @@
 首个版本发布前，使用确定的 Git Commit：
 
 ```bash
-go get github.com/csjgg/sandcamp@<commit>
+go get github.com/TencentCloudAgentRuntime/sandcamp@<commit>
 ```
 
 ```go
-import "github.com/csjgg/sandcamp"
+import "github.com/TencentCloudAgentRuntime/sandcamp"
 ```
 
 Sandcamp 返回官方 AGS Go SDK `v20250920` 的 `StorageMount` 和

@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/csjgg/sandcamp"
-	"github.com/csjgg/sandcamp/test/e2e/internal/model"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp/test/e2e/internal/model"
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 

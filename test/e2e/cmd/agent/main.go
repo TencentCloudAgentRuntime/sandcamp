@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/csjgg/sandcamp/test/e2e/internal/model"
+	"github.com/TencentCloudAgentRuntime/sandcamp/test/e2e/internal/model"
 )
 
 const (

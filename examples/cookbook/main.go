@@ -33,7 +33,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/csjgg/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
 	"github.com/joho/godotenv"
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"

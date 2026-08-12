@@ -9,11 +9,12 @@ Sandcamp 是一个用于 AGS 的进程编排 SDK。它让一个沙箱同时运�
 主镜像不需要包含 `campd` 或 `sandrun`。这两个静态二进制由单独的 Runtime Image
 Volume 提供。
 
-创建 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会先执行完整回归，再把
-`linux/amd64` 预发布构建产物保存为 `ghcr.io/csjgg/sandcamp-runtime:beta` 和对应
-版本标签。普通 `main` push 与 Pull Request 只执行测试，不发布镜像。AGS Image Volume
-当前不能直接从 GHCR 拉取；使用前必须把该 Runtime 镜像同步到调用方自己的腾讯云
-CCR 或 TCR。需要固定内容时，优先同步版本标签、`sha-<完整 Git Commit>` 或 Digest。
+组织仓库首次推送 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会先执行完整
+回归，再把 `linux/amd64` 预发布构建产物保存为
+`ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta` 和对应版本标签。普通 `main`
+push 与 Pull Request 只执行测试，不发布镜像。AGS Image Volume 当前不能直接从 GHCR
+拉取；使用前必须把该 Runtime 镜像同步到调用方自己的腾讯云 CCR 或 TCR。需要固定
+内容时，优先同步版本标签、`sha-<完整 Git Commit>` 或 Digest。
 
 [完整 Cookbook](examples/cookbook/main.go) ·
 [API 参考](docs/api-reference.md) ·
@@ -27,15 +28,15 @@ CCR 或 TCR。需要固定内容时，优先同步版本标签、`sha-<完整 Gi
 首个版本发布前，可以直接依赖确定的 Git Commit：
 
 ```bash
-go get github.com/csjgg/sandcamp@<commit>
+go get github.com/TencentCloudAgentRuntime/sandcamp@<commit>
 ```
 
 先把 Runtime 镜像同步到 AGS 能访问的 Registry。例如使用 CCR：
 
 ```bash
-docker pull ghcr.io/csjgg/sandcamp-runtime:beta
+docker pull ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
 docker tag \
-  ghcr.io/csjgg/sandcamp-runtime:beta \
+  ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta \
   ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
 docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
 ```

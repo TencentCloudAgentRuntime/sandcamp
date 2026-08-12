@@ -5,13 +5,13 @@
 
 ## Beta 构建产物
 
-推送 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会执行完整回归，并把通过
-测试的同一份 Runtime 二进制打包保存到 GitHub Container Registry：
+组织仓库首次推送 `v*-beta.*` Git tag（例如 `v0.1.0-beta.1`）后，CI 会执行完整
+回归，并把通过测试的同一份 Runtime 二进制打包保存到 GitHub Container Registry：
 
 ```text
-ghcr.io/csjgg/sandcamp-runtime:beta
-ghcr.io/csjgg/sandcamp-runtime:v0.1.0-beta.1
-ghcr.io/csjgg/sandcamp-runtime:sha-<完整 Git Commit>
+ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
+ghcr.io/tencentcloudagentruntime/sandcamp-runtime:<version>
+ghcr.io/tencentcloudagentruntime/sandcamp-runtime:sha-<完整 Git Commit>
 ```
 
 `beta` 只会随成功的 beta tag 构建移动。普通 `main` push、Pull Request 和手动 CI
@@ -23,9 +23,9 @@ Runtime/Sidecar Image Volume 只支持腾讯云 CCR（`personal`）和 TCR
 （`enterprise`）。使用前需要把镜像同步到调用方自己的 CCR 或 TCR，例如：
 
 ```bash
-docker pull ghcr.io/csjgg/sandcamp-runtime:beta
+docker pull ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
 docker tag \
-  ghcr.io/csjgg/sandcamp-runtime:beta \
+  ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta \
   ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
 docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
 ```

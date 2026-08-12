@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/csjgg/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 

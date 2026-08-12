@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/csjgg/sandcamp"
+	"github.com/TencentCloudAgentRuntime/sandcamp"
 )
 
 func TestCatalogNamesAndRenderedSpecs(t *testing.T) {
