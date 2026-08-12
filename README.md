@@ -14,7 +14,8 @@ Volume 提供。
 还会更新 `ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta`；稳定版本会更新
 `latest`。普通 `main` push 与 Pull Request 只执行测试，不发布镜像。AGS Image Volume
 当前不能直接从 GHCR 拉取；使用前必须把 Runtime 镜像同步到调用方自己的腾讯云 CCR
-或 TCR。需要固定内容时，优先同步精确版本、SHA 标签或 Digest。
+或 TCR。需要固定内容时，同步源使用精确版本、SHA 标签或 Digest，目标则使用
+不可变 tag。AGS 主镜像字段要求 tag，不接受 `tag@digest`。
 
 [完整 Cookbook](examples/cookbook/main.go) ·
 [API 参考](docs/api-reference.md) ·
@@ -141,6 +142,10 @@ go -C examples/cookbook run .
 
 Cookbook 使用独立 `go.mod` 管理示例依赖。真实 `.env` 已被 Git 忽略；进程已有的环境
 变量优先于文件中的同名值。
+
+Cookbook 固定使用体积较小的 Docker Official Bash 主镜像和 OpenSandbox
+Egress Sidecar。主镜像自带 Bash、`ps`、`wget`、`nslookup` 和 `nc`，因此
+Instance 进入 RUNNING 后可以直接登录查看共享 PID/Network Namespace 中的效果。
 
 ## 运行原理
 

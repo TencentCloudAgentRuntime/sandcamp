@@ -5,8 +5,15 @@
 //  3. 创建 custom Tool，等待其进入 ACTIVE；
 //  4. 使用同一份启动配置创建 Instance。
 //
-// AGS Image Volume 只能从腾讯云 CCR/TCR 拉取镜像。运行前先把 Sandcamp Runtime、
-// 主镜像和 Sidecar 镜像推送到自己的 CCR 或 TCR，并创建本地配置：
+// 示例使用固定 Linux/amd64 Manifest 的公开上游镜像：
+//
+//   - Main: docker.io/library/bash@sha256:534a5f1d11652aadaa9f08838f6637ac11a46a8b4b736a4cbf09c5945e38516f
+//   - Sidecar: docker.io/opensandbox/egress@sha256:0dd9727216b535fa34ef77495c3e465da848b888c28ee4be4f92c1003a97a71f
+//
+// Docker Official Bash 镜像约 6.5 MB，自带 Bash 以及 BusyBox 的 ps、wget、
+// nslookup 和 nc，登录沙箱后不需要再安装排查工具。
+// AGS 镜像引用需要使用平台支持的个人版或企业版镜像仓库；运行前先把
+// 上述两个镜像和 Sandcamp Runtime 同步到自己的腾讯云镜像仓库，并创建本地配置：
 //
 //	cp examples/cookbook/.env.example examples/cookbook/.env
 //	# 编辑 examples/cookbook/.env
@@ -15,8 +22,8 @@
 // Cookbook 是独立 Go 模块，程序从自身目录读取 .env；已经存在的系统环境变量优先。
 // 真实 .env 已被 Git 忽略，不要把 Secret ID、Secret Key 或 Role ARN 提交到仓库。
 //
-// 程序会实际创建 Tool 并启动 Instance，只输出资源 ID，不等待 Instance 进入 RUNNING，
-// 也不自动清理。验证完成后需要显式停止 Instance 并删除 Tool。
+// 程序会实际创建 Tool、启动 Instance，等待其进入 RUNNING，然后打印登录与
+// 验证命令。程序不自动清理；验证完成后需要显式停止 Instance 并删除 Tool。
 // Runtime Image Volume 提供 campd 和 sandrun。campd 负责进程启动、信号转发和聚合
 // 探针；sandrun 使用独立 Mount Namespace 和 OverlayFS RootFS 启动 Sidecar。它不创建
 // PID 或 Network Namespace，因此 Main 与 Sidecar 进程相互可见并共享 Loopback；这不是
@@ -61,7 +68,7 @@ func main() {
 		"AGS_ROLE_ARN",
 		"SANDCAMP_MAIN_IMAGE",
 		"SANDCAMP_RUNTIME_IMAGE",
-		"SANDCAMP_SIDECAR_IMAGE",
+		"SANDCAMP_EGRESS_IMAGE",
 		"SANDCAMP_IMAGE_REGISTRY_TYPE",
 	}
 	for _, name := range required {
@@ -81,8 +88,8 @@ func main() {
 			ImageRegistryType: registryType,
 		},
 		Sidecars: []sandcamp.SidecarImage{{
-			Name:              "proxy",
-			Reference:         os.Getenv("SANDCAMP_SIDECAR_IMAGE"),
+			Name:              "egress",
+			Reference:         os.Getenv("SANDCAMP_EGRESS_IMAGE"),
 			ImageRegistryType: registryType,
 		}},
 	}
@@ -91,24 +98,32 @@ func main() {
 	// Process 通过 Name 对应；Command 是完整 argv，不是 Shell 字符串。
 	processes := sandcamp.Spec{
 		Sidecars: []sandcamp.Process{{
-			Name: "proxy",
-			// sandrun 完成 pivot_root 后再启动进程，因此 Command、WorkDir，以及
-			// HOME/PATH 中的文件路径都属于 proxy Sidecar 镜像的 RootFS，
-			// 不是主镜像中的路径。
-			Command: []string{"/usr/local/bin/python", "/opt/fastapi-proxy/app.py"},
-			WorkDir: "/opt/fastapi-proxy",
-			// User 省略时继承 root；这个最小示例中的所有进程都以 root 启动。
-			Env: map[string]string{
-				"HOME":         "/root",
-				"PATH":         "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
-				"UPSTREAM_URL": "http://127.0.0.1:8080/",
+			Name: "egress",
+			// Image Volume 不会自动应用 OCI Entrypoint，因此这里显式复现
+			// OpenSandbox Egress 官方镜像的 argv。下面所有路径都来自
+			// Egress Sidecar RootFS，而不是 Bash 主镜像。
+			Command: []string{
+				"/opt/opensandbox-egress/supervisor",
+				"--pre-start=/opt/opensandbox-egress/cleanup.sh",
+				"--name=egress",
+				"--grace-period=20s",
+				"--",
+				"/opt/opensandbox-egress/egress",
 			},
-			// Expose 把 9200 写入 AGS 的对外端口配置；沙箱内部通过共享
+			// User 省略时以 root 启动。Egress 会在共享 Network Namespace
+			// 中设置 DNS 转发规则，因此它会影响 Main 和其他 Sidecar。
+			Env: map[string]string{
+				"OPENSANDBOX_EGRESS_MODE":      "dns",
+				"OPENSANDBOX_EGRESS_HTTP_ADDR": ":24774",
+				"OPENSANDBOX_EGRESS_RULES":     `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"*.example.com"}]}`,
+				"PATH":                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			},
+			// Expose 把 24774 写入 AGS 的对外端口配置；沙箱内部通过共享
 			// Loopback 访问端口时不需要 Expose。
-			Expose: []int{9200},
+			Expose: []int{24774},
 			// 首次成功后 campd 才继续启动后续声明；运行期间会持续探测，
 			// 并把结果聚合到 campd 的 /ready。
-			Probe: sandcamp.HTTPReadinessProbe("/healthz", 9200),
+			Probe: sandcamp.HTTPReadinessProbe("/healthz", 24774),
 		}},
 		// Main 是数组；每一项都在 AGS 主 Mount Namespace 中执行。Sidecars
 		// 完成启动 Gate 后，Main 再按声明顺序处理。Main 的可执行文件既可以
@@ -119,15 +134,28 @@ func main() {
 				Kind:    sandcamp.Service,
 				Command: []string{envdMountPath, "-port", fmt.Sprint(envdPort)},
 				// envd 作为 Main Service 由 campd 管理，不经过 sandrun。
-				// Probe 首次成功后才继续启动 api，并持续参与 /ready 聚合。
+				// Probe 首次成功后才继续启动 main-http，并持续参与 /ready 聚合。
 				Expose: []int{envdPort},
 				Probe:  sandcamp.HTTPReadinessProbe("/health", envdPort),
 			},
 			{
-				Name: "api",
-				// Kind 省略时默认为 Service。
-				Command: []string{"/app/server"},
-				WorkDir: "/app",
+				Name: "main-http",
+				// Kind 省略时默认为 Service。这些路径来自 Bash
+				// 主镜像；User 省略时以 root 启动。官方镜像把 Bash
+				// 安装在 /usr/local/bin，而 envd 远程终端调用 /bin/bash，
+				// 所以启动时显式创建软链接。
+				Command: []string{
+					"/usr/local/bin/bash",
+					"-c",
+					`ln -sf /usr/local/bin/bash /bin/bash
+cat > /tmp/sandcamp-http-response <<'EOF'
+#!/usr/local/bin/bash
+printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nsandcamp main ok\n'
+EOF
+chmod 0755 /tmp/sandcamp-http-response
+exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`,
+				},
+				WorkDir: "/",
 				Expose:  []int{8080},
 				Probe:   sandcamp.HTTPReadinessProbe("/healthz", 8080),
 			},
@@ -285,5 +313,47 @@ func main() {
 		log.Fatal("StartSandboxInstance did not return InstanceId")
 	}
 
-	fmt.Printf("instance_id=%s\n", *startResponse.Response.Instance.InstanceId)
+	instanceID := *startResponse.Response.Instance.InstanceId
+	fmt.Printf("instance_id=%s\n", instanceID)
+
+	// 等待聚合探针通过，让后面打印的登录与查看命令可以直接执行。
+	for {
+		describeRequest := ags.NewDescribeSandboxInstanceListRequest()
+		describeRequest.InstanceIds = common.StringPtrs([]string{instanceID})
+		describeResponse, err := client.DescribeSandboxInstanceListWithContext(ctx, describeRequest)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if describeResponse.Response != nil && len(describeResponse.Response.InstanceSet) == 1 {
+			instance := describeResponse.Response.InstanceSet[0]
+			if instance.Status != nil && *instance.Status == "RUNNING" {
+				break
+			}
+			if instance.Status != nil && (*instance.Status == "FAILED" || *instance.Status == "STOPPED") {
+				log.Fatalf("instance entered terminal status %s", *instance.Status)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			log.Fatal(ctx.Err())
+		case <-time.After(3 * time.Second):
+		}
+	}
+
+	fmt.Printf(`instance_status=RUNNING
+
+先让 agr 继承 Cookbook 的本地凭据（不会打印凭据）：
+  set -a; source .env; set +a
+
+登录主镜像：
+  agr instance login %s --user root
+
+登录后可直接执行：
+  ps -ef
+  wget -qO- http://127.0.0.1:24774/healthz
+  wget -qO- http://127.0.0.1:8080/healthz
+  wget -S -O /dev/null http://127.0.0.1:49983/health
+  nslookup example.com
+  nslookup example.org  # 预期被 Egress 策略拒绝
+`, instanceID)
 }
