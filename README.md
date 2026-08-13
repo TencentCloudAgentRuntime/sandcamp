@@ -124,13 +124,14 @@ toolConfiguration.Image = &mainImage
 toolConfiguration.ImageRegistryType = common.StringPtr(string(registryType))
 toolRequest.CustomConfiguration = &toolConfiguration
 
-startRequest.CustomConfiguration = configuration
-// MountOptions 保持 nil，Instance 继承 Tool.StorageMounts。
+// Instance 无需覆盖启动配置：CustomConfiguration 与 MountOptions 均保持 nil，
+// 分别继承 Tool.CustomConfiguration 和 Tool.StorageMounts。
 ```
 
-AGS custom Tool 要求默认 `Command` 和 `Probe`，所以 Tool 与 Instance 都使用
-`RenderStart` 的结果。Tool 的副本再补充主镜像和资源配置。完整、直接发送请求的
-代码见 [`examples/cookbook/main.go`](examples/cookbook/main.go)。
+AGS custom Tool 要求默认 `Command` 和 `Probe`，所以 Tool 使用 `RenderStart` 的结果，
+再在副本中补充主镜像和资源配置。Instance 如果不需要修改进程声明，直接继承 Tool
+即可；只有每个 Instance 需要不同声明时，才重新调用 `RenderStart` 并作为覆盖配置传入。
+完整、直接发送请求的代码见 [`examples/cookbook/main.go`](examples/cookbook/main.go)。
 
 运行 Cookbook 时从示例配置创建本地 `.env`：
 

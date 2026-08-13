@@ -300,9 +300,9 @@ exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`,
 	startRequest.Timeout = common.StringPtr("15m")
 	startRequest.ClientToken = common.StringPtr("sandcamp-start-" + runID)
 	startRequest.AuthMode = common.StringPtr("TOKEN")
-	// Instance 使用原始 RenderStart 结果；主镜像已由 Tool 默认配置提供。
-	startRequest.CustomConfiguration = configuration
-	// MountOptions 保持 nil，Instance 继承 Tool.StorageMounts。
+	// CustomConfiguration 保持 nil，Instance 完整继承 Tool 中已经保存的
+	// 主镜像、campd 启动配置、SANDCAMP_SPEC、Ports、Probe 和资源配置。
+	// MountOptions 也保持 nil，Instance 继承 Tool.StorageMounts。
 
 	startResponse, err := client.StartSandboxInstanceWithContext(ctx, startRequest)
 	if err != nil {

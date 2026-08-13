@@ -36,8 +36,8 @@ toolConfiguration.Image = &mainImage
 toolConfiguration.ImageRegistryType = common.StringPtr(string(registryType))
 toolRequest.CustomConfiguration = &toolConfiguration
 
-startRequest.CustomConfiguration = configuration
-// startRequest.MountOptions 保持 nil。
+// startRequest.CustomConfiguration 与 startRequest.MountOptions 保持 nil，
+// 分别继承 Tool.CustomConfiguration 和 Tool.StorageMounts。
 ```
 
 这里的 Renderer 只是指 `RenderMounts` 和 `RenderStart` 两个“把声明转换成请求字段”
