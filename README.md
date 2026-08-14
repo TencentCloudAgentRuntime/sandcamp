@@ -9,10 +9,12 @@ Sandcamp 是一个用于 AGS 的进程编排 SDK。它让一个沙箱同时运�
 主镜像不需要包含 `campd` 或 `sandrun`。这两个静态二进制由单独的 Runtime Image
 Volume 提供。
 
-推送 `vMAJOR.MINOR.PATCH[-PRERELEASE]` Git tag 后，CI 会先执行完整回归，再发布
-`linux/amd64` Runtime 镜像的精确版本标签和 `sha-<完整 Git Commit>` 标签。Beta 版本
-还会更新 `ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta`；稳定版本会更新
-`latest`。普通 `main` push 与 Pull Request 只执行测试，不发布镜像。AGS Image Volume
+发布标签严格使用稳定 SemVer：`vMAJOR.MINOR.PATCH`。从 `v1.0.0` 开始，Major 表示
+不兼容变更，Minor 表示向后兼容的新功能，Patch 表示向后兼容的修复；`v0.x.y` 表示
+公开 API 仍处于初始开发阶段，Minor 用于功能或 API 演进，Patch 用于兼容修复。推送
+合规标签后，CI 会先执行完整回归，再发布 `linux/amd64` Runtime 镜像的精确版本、
+`sha-<完整 Git Commit>` 和 `latest` 标签。普通 `main` push 与 Pull Request 只执行测试，
+不发布镜像。AGS Image Volume
 当前不能直接从 GHCR 拉取；使用前必须把 Runtime 镜像同步到调用方自己的腾讯云 CCR
 或 TCR。需要固定内容时，同步源使用精确版本、SHA 标签或 Digest，目标则使用
 不可变 tag。AGS 主镜像字段要求 tag，不接受 `tag@digest`。
@@ -30,17 +32,17 @@ Volume 提供。
 
 ```bash
 go env -w GOPRIVATE=github.com/TencentCloudAgentRuntime
-go get github.com/TencentCloudAgentRuntime/sandcamp@v0.1.0-beta
+go get github.com/TencentCloudAgentRuntime/sandcamp@v0.1.0
 ```
 
 先把 Runtime 镜像同步到 AGS 能访问的 Registry。例如使用 CCR：
 
 ```bash
-docker pull ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta
+docker pull ghcr.io/tencentcloudagentruntime/sandcamp-runtime:v0.1.0
 docker tag \
-  ghcr.io/tencentcloudagentruntime/sandcamp-runtime:beta \
-  ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
-docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:beta
+  ghcr.io/tencentcloudagentruntime/sandcamp-runtime:v0.1.0 \
+  ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:v0.1.0
+docker push ccr.ccs.tencentyun.com/<namespace>/sandcamp-runtime:v0.1.0
 ```
 
 TCR 使用对应实例的 Registry 地址。主镜像与 Sidecar 镜像同样需要位于 AGS 支持的

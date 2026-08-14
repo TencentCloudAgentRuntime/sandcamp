@@ -4,8 +4,8 @@
 AGS 资源。
 
 GitHub Actions 在 Pull Request、`main` 更新和手动触发时执行格式、Go/Rust 测试、
-Clippy、静态 Linux 构建与 Docker 整栈回归。符合
-`vMAJOR.MINOR.PATCH[-PRERELEASE]` 的 Tag 在相同门禁通过后额外发布 Runtime 镜像；
+Clippy、静态 Linux 构建与 Docker 整栈回归。符合稳定 SemVer
+`vMAJOR.MINOR.PATCH` 的 Tag 在相同门禁通过后额外发布 Runtime 镜像；
 普通分支构建不推送镜像。
 
 ## Go SDK

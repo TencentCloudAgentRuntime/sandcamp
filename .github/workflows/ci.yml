@@ -40,38 +40,9 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          version="${VERSION#v}"
-          if [[ "$VERSION" == "$version" || "$version" == *+* ]]; then
-            printf 'invalid release tag: %s\n' "$VERSION" >&2
+          if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'release tag must be stable SemVer vMAJOR.MINOR.PATCH: %s\n' "$VERSION" >&2
             exit 1
-          fi
-
-          core="${version%%-*}"
-          IFS='.' read -r -a core_parts <<< "$core"
-          if (( ${#core_parts[@]} != 3 )); then
-            printf 'release tag must be vMAJOR.MINOR.PATCH[-PRERELEASE]: %s\n' "$VERSION" >&2
-            exit 1
-          fi
-          for part in "${core_parts[@]}"; do
-            if [[ ! "$part" =~ ^(0|[1-9][0-9]*)$ ]]; then
-              printf 'invalid release number in tag: %s\n' "$VERSION" >&2
-              exit 1
-            fi
-          done
-
-          if [[ "$version" == *-* ]]; then
-            prerelease="${version#*-}"
-            if [[ -z "$prerelease" ]]; then
-              printf 'prerelease identifier must not be empty: %s\n' "$VERSION" >&2
-              exit 1
-            fi
-            IFS='.' read -r -a prerelease_parts <<< "$prerelease"
-            for part in "${prerelease_parts[@]}"; do
-              if [[ -z "$part" || ! "$part" =~ ^[0-9A-Za-z-]+$ || "$part" =~ ^0[0-9]+$ ]]; then
-                printf 'invalid prerelease identifier in tag: %s\n' "$VERSION" >&2
-                exit 1
-              fi
-            done
           fi
 
       - name: Set up Go
@@ -242,8 +213,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,format=long,prefix=sha-
-            type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta') }}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=Sandcamp runtime bundle
             org.opencontainers.image.description=campd, sandrun, and the restricted launcher for a Sandcamp Runtime Image Volume

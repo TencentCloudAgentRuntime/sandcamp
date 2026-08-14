@@ -6,7 +6,7 @@
 
 ```bash
 go env -w GOPRIVATE=github.com/TencentCloudAgentRuntime
-go get github.com/TencentCloudAgentRuntime/sandcamp@v0.1.0-beta
+go get github.com/TencentCloudAgentRuntime/sandcamp@v0.1.0
 ```
 
 ```go
