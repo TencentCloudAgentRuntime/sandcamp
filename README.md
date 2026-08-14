@@ -81,6 +81,10 @@ spec := sandcamp.Spec{
             "HOME": "/home/app",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
         },
+        Mounts: []sandcamp.BindMount{{
+            Source: "/mnt/share", // 主镜像或 Tool StorageMount 中的现有路径
+            Target: "/mnt/share", // Sidecar RootFS 中的现有路径
+        }},
         Expose: []int{9200},
         Probe:  sandcamp.HTTPReadinessProbe("/healthz", 9200),
     }},
@@ -103,7 +107,9 @@ spec := sandcamp.Spec{
 ```
 
 `Sidecars` 先按声明顺序处理，随后处理 `Main`。`Main` 是数组，因此可以为空、包含
-一个进程，或让同一主镜像 RootFS 启动多个进程。
+一个进程，或让同一主镜像 RootFS 启动多个进程。Sidecar 的 `Mounts` 会把主 Mount
+Namespace 中的路径 Bind 到 Sidecar RootFS；多个 Sidecar 绑定同一个 Source 时共享
+同一份数据。
 
 再把声明转换为 AGS 请求字段：
 
@@ -147,6 +153,8 @@ Cookbook 使用独立 `go.mod` 管理示例依赖。真实 `.env` 已被 Git 忽
 Cookbook 固定使用体积较小的 Docker Official Bash 主镜像和 OpenSandbox
 Egress Sidecar。主镜像自带 Bash、`ps`、`wget`、`nslookup` 和 `nc`，因此
 Instance 进入 RUNNING 后可以直接登录查看共享 PID/Network Namespace 中的效果。
+示例还会把 Main 的 `/var/tmp` Bind 到 Egress 的 `/var/tmp`，并打印双向写入与 inode
+对比命令；两个上游镜像都预先包含该目录，不需要制作派生镜像。
 
 ## 运行原理
 

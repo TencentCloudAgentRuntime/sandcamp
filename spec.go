@@ -72,9 +72,21 @@ type Process struct {
 	WorkDir string
 	User    *ProcessUser
 	Expose  []int
+	// Mounts bind paths from the sandbox's main Mount Namespace into a
+	// Sidecar root filesystem. Main processes cannot configure Mounts.
+	Mounts []BindMount
 
 	Probe   *ReadinessProbe // Service only.
 	Timeout time.Duration   // RunToCompletion only.
+}
+
+// BindMount shares one existing path from the sandbox's main Mount Namespace
+// with a Sidecar. Source and Target must both exist when the Sidecar starts and
+// must have matching file types. Bind mounts do not remap ownership.
+type BindMount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // ProcessUser selects a process identity by image user name or explicit
@@ -129,6 +141,9 @@ func (spec Spec) Validate() error {
 		if err := validateProcess(process, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
 		}
+		if err := validateSidecarMounts(process); err != nil {
+			return err
+		}
 	}
 	for index, process := range spec.Main {
 		if process.Name == "" {
@@ -136,6 +151,9 @@ func (spec Spec) Validate() error {
 		}
 		if err := validateProcess(process, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
+		}
+		if len(process.Mounts) != 0 {
+			return fmt.Errorf("%w: main process %s cannot configure bind mounts", ErrInvalidSpec, process.Name)
 		}
 	}
 	if serviceCount == 0 {
@@ -148,6 +166,58 @@ func (spec Spec) Validate() error {
 		return fmt.Errorf("%w: declared %s, maximum is %s", ErrStartupBudget, startupBudget, MaxStartupBudget)
 	}
 	return nil
+}
+
+var standardSidecarMountTargets = [...]string{
+	"/proc",
+	"/dev",
+	"/sys",
+	"/tmp",
+	"/run",
+	"/etc/resolv.conf",
+	"/etc/hosts",
+}
+
+func validateSidecarMounts(process Process) error {
+	targets := make([]string, 0, len(standardSidecarMountTargets)+len(process.Mounts))
+	targets = append(targets, standardSidecarMountTargets[:]...)
+	for index, mount := range process.Mounts {
+		if !validAbsolutePath(mount.Source) {
+			return fmt.Errorf(
+				"%w: sidecar process %s mounts[%d].source must be a clean absolute path",
+				ErrInvalidSpec,
+				process.Name,
+				index,
+			)
+		}
+		if !validAbsolutePath(mount.Target) {
+			return fmt.Errorf(
+				"%w: sidecar process %s mounts[%d].target must be a clean absolute path",
+				ErrInvalidSpec,
+				process.Name,
+				index,
+			)
+		}
+		for _, previous := range targets {
+			if mountTargetsOverlap(previous, mount.Target) {
+				return fmt.Errorf(
+					"%w: sidecar process %s bind target %s overlaps %s",
+					ErrInvalidSpec,
+					process.Name,
+					mount.Target,
+					previous,
+				)
+			}
+		}
+		targets = append(targets, mount.Target)
+	}
+	return nil
+}
+
+func mountTargetsOverlap(first, second string) bool {
+	return first == second ||
+		strings.HasPrefix(first, second+"/") ||
+		strings.HasPrefix(second, first+"/")
 }
 
 func validateProcess(

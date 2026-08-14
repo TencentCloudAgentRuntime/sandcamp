@@ -123,6 +123,7 @@ type Process struct {
     WorkDir string
     User    *ProcessUser
     Expose  []int
+    Mounts  []BindMount
 
     Probe   *ReadinessProbe
     Timeout time.Duration
@@ -197,6 +198,37 @@ Command: []string{"/bin/sh", "-c", "exec /app/server --port 8080"}
 - Sidecar：同名 Sidecar 镜像中的绝对路径；
 - `/` 可作为 WorkDir；
 - Sidecar WorkDir 在 `pivot_root` 后应用。
+
+### `Mounts`
+
+```go
+type BindMount struct {
+    Source   string
+    Target   string
+    ReadOnly bool
+}
+
+Mounts: []sandcamp.BindMount{{
+    Source: "/mnt/share",
+    Target: "/mnt/share",
+}}
+```
+
+`Mounts` 仅适用于 Sidecar。Source 是 Sidecar 启动前在主 Mount Namespace 中看到的
+绝对路径，可以来自主镜像 RootFS 或 Tool StorageMount；Target 是 Sidecar RootFS
+中的绝对路径。sandrun 在 Sidecar OverlayFS 上完成 Bind 后才执行 `pivot_root`。
+
+- Source 和 Target 必须提前存在，并且目录对应目录、文件对应文件；
+- Source、Target 都必须是规范化绝对路径，且不能是 `/`；
+- Target 不能重复、互相包含，或与 `/proc`、`/dev`、`/sys`、`/tmp`、`/run`、
+  `/etc/hosts`、`/etc/resolv.conf` 等标准挂载重叠；
+- `ReadOnly` 只限制当前 Sidecar 的挂载，不改变 Source 在 Main 或其他 Sidecar 中的权限；
+- Bind 不复制数据，也不执行 UID/GID 映射；
+- 多个 Sidecar Bind 同一 Source 时共享文件修改；
+- Sidecar 私有 Overlay upper 不在主 Mount Namespace 中，不能作为其他 Sidecar 的共享源。
+
+因为 Sidecar 在 Main 进程之前启动，Source 不能依赖后续 Main 进程创建。需要动态共享
+数据时，应让 Source 预先存在于主镜像或 Tool StorageMount 中，再 Bind 给各 Sidecar。
 
 ### `User`
 
@@ -298,7 +330,8 @@ func RenderStart(images ImageSet, spec Spec) (*ags.CustomConfiguration, error)
 
 runtime declaration 是 Go SDK 与 campd 之间的序列化协议，也就是文档或代码中所说的
 “wire”结构。调用方不应自行构造它。Renderer 为 Sidecar 注入解析后的 Image Volume
-RootFS；`Expose` 已转换为 AGS Ports，所以不会继续出现在 wire Process 中。
+RootFS，把 `Mounts` 转换为 Sidecar `binds`；`Expose` 已转换为 AGS Ports，所以不会
+继续出现在 wire Process 中。
 
 顶层 `Args=['--']` 用于阻止主镜像原有 CMD 被 AGS 追加到 campd。它不是业务进程
 参数。campd 启动 Sidecar 时会自行构造 sandrun argv，并在 sandrun 选项与

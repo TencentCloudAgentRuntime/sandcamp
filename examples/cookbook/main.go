@@ -23,7 +23,8 @@
 // 真实 .env 已被 Git 忽略，不要把 Secret ID、Secret Key 或 Role ARN 提交到仓库。
 //
 // 程序会实际创建 Tool、启动 Instance，等待其进入 RUNNING，然后打印登录与
-// 验证命令。程序不自动清理；验证完成后需要显式停止 Instance 并删除 Tool。
+// 验证命令，其中包括 Main 与 Egress Sidecar 双向读写同一目录。程序不自动清理；
+// 验证完成后需要显式停止 Instance 并删除 Tool。
 // Runtime Image Volume 提供 campd 和 sandrun。campd 负责进程启动、信号转发和聚合
 // 探针；sandrun 使用独立 Mount Namespace 和 OverlayFS RootFS 启动 Sidecar。它不创建
 // PID 或 Network Namespace，因此 Main 与 Sidecar 进程相互可见并共享 Loopback；这不是
@@ -118,6 +119,14 @@ func main() {
 				"OPENSANDBOX_EGRESS_RULES":     `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"*.example.com"}]}`,
 				"PATH":                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			},
+			// Source 从主 Mount Namespace 解析，Target 从 Egress RootFS
+			// 解析。两个公开上游镜像都预先包含 /var/tmp，因此不需要制作
+			// 派生镜像。Sidecar 启动后，双方看到的是同一目录和同一批 inode；
+			// ReadOnly 省略时为 false，Main 与 Egress 都可以写入。
+			Mounts: []sandcamp.BindMount{{
+				Source: "/var/tmp",
+				Target: "/var/tmp",
+			}},
 			// Expose 把 24774 写入 AGS 的对外端口配置；沙箱内部通过共享
 			// Loopback 访问端口时不需要 Expose。
 			Expose: []int{24774},
@@ -148,6 +157,7 @@ func main() {
 					"/usr/local/bin/bash",
 					"-c",
 					`ln -sf /usr/local/bin/bash /bin/bash
+printf 'created by Main\n' > /var/tmp/sandcamp-from-main.txt
 cat > /tmp/sandcamp-http-response <<'EOF'
 #!/usr/local/bin/bash
 printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nsandcamp main ok\n'
@@ -355,5 +365,23 @@ exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`,
   wget -S -O /dev/null http://127.0.0.1:49983/health
   nslookup example.com
   nslookup example.org  # 预期被 Egress 策略拒绝
+
+验证 Main 与 Egress Sidecar 共享 /var/tmp：
+  egress_pid="$(ps -o pid,args | awk '$2 == "/opt/opensandbox-egress/supervisor" {print $1; exit}')"
+  echo "egress supervisor pid=$egress_pid"
+
+  # Main 启动时写入，进入 Egress 的 Mount Namespace 后可以直接读取。
+  cat /var/tmp/sandcamp-from-main.txt
+  nsenter -t "$egress_pid" -m -r -w -- cat /var/tmp/sandcamp-from-main.txt
+
+  # 从 Egress RootFS 写入，同一文件立即出现在 Main 中。
+  nsenter -t "$egress_pid" -m -r -w -- /bin/sh -c \
+    'printf "created by Egress Sidecar\n" > /var/tmp/sandcamp-from-egress.txt'
+  cat /var/tmp/sandcamp-from-egress.txt
+
+  # 两边的 device:inode 相同，说明它是 Bind 共享，不是文件复制。
+  stat -c 'Main: %%d:%%i %%n' /var/tmp/sandcamp-from-egress.txt
+  nsenter -t "$egress_pid" -m -r -w -- \
+    stat -c 'Sidecar: %%d:%%i %%n' /var/tmp/sandcamp-from-egress.txt
 `, instanceID)
 }

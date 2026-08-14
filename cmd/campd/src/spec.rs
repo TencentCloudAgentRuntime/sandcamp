@@ -13,6 +13,15 @@ const AGS_READY_TIMEOUT_MS: u64 = 30_000;
 const MAX_STARTUP_BUDGET_MS: u64 = 25_000;
 const CONTROL_PORT: u16 = 49_982;
 const SPEC_ENVIRONMENT: &str = "SANDCAMP_SPEC";
+const STANDARD_MOUNT_TARGETS: [&str; 7] = [
+    "/proc",
+    "/dev",
+    "/sys",
+    "/tmp",
+    "/run",
+    "/etc/resolv.conf",
+    "/etc/hosts",
+];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -191,7 +200,17 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
         if let Some(user) = &process.user {
             validate_user(&process.name, user)?;
         }
-        let mut bind_targets = HashSet::with_capacity(process.binds.len());
+        let mut bind_targets = Vec::with_capacity(
+            process.binds.len()
+                + if process.standard_mounts {
+                    STANDARD_MOUNT_TARGETS.len()
+                } else {
+                    0
+                },
+        );
+        if process.standard_mounts {
+            bind_targets.extend(STANDARD_MOUNT_TARGETS.iter().map(Path::new));
+        }
         for bind in &process.binds {
             if !valid_path(&bind.source, false) || !valid_path(&bind.target, false) {
                 return Err(SpecError::new(format!(
@@ -199,12 +218,24 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
                     process.name
                 )));
             }
-            if !bind_targets.insert(&bind.target) {
-                return Err(SpecError::new(format!(
-                    "sidecar {} bind target {} is duplicated",
-                    process.name, bind.target
-                )));
+            let target = Path::new(&bind.target);
+            for previous in &bind_targets {
+                if target == *previous {
+                    return Err(SpecError::new(format!(
+                        "sidecar {} bind target {} is duplicated",
+                        process.name, bind.target
+                    )));
+                }
+                if target.starts_with(previous) || previous.starts_with(target) {
+                    return Err(SpecError::new(format!(
+                        "sidecar {} bind target {} overlaps {}",
+                        process.name,
+                        bind.target,
+                        previous.display()
+                    )));
+                }
             }
+            bind_targets.push(target);
         }
     }
 
@@ -528,6 +559,73 @@ mod tests {
         }));
         spec.main[1].user = Some(ProcessUser::Named(NamedUser { name: "app".into() }));
         assert_eq!(validate(&spec), Ok(()));
+    }
+
+    #[test]
+    fn accepts_sidecar_bind_mounts() {
+        let mut spec = valid_spec();
+        spec.sidecars[0].binds = vec![
+            Bind {
+                source: "/mnt/share".into(),
+                target: "/mnt/share".into(),
+                readonly: false,
+            },
+            Bind {
+                source: "/etc/sandcamp/proxy.json".into(),
+                target: "/opt/proxy/proxy.json".into(),
+                readonly: true,
+            },
+        ];
+        assert_eq!(validate(&spec), Ok(()));
+    }
+
+    #[test]
+    fn rejects_invalid_or_overlapping_sidecar_bind_mounts() {
+        let mut relative = valid_spec();
+        relative.sidecars[0].binds.push(Bind {
+            source: "mnt/share".into(),
+            target: "/mnt/share".into(),
+            readonly: false,
+        });
+        assert!(
+            validate(&relative)
+                .unwrap_err()
+                .to_string()
+                .contains("clean and absolute")
+        );
+
+        let mut overlapping = valid_spec();
+        overlapping.sidecars[0].binds = vec![
+            Bind {
+                source: "/mnt/share-a".into(),
+                target: "/mnt/share".into(),
+                readonly: false,
+            },
+            Bind {
+                source: "/mnt/share-b".into(),
+                target: "/mnt/share/cache".into(),
+                readonly: false,
+            },
+        ];
+        assert!(
+            validate(&overlapping)
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps")
+        );
+
+        let mut standard = valid_spec();
+        standard.sidecars[0].binds.push(Bind {
+            source: "/mnt/share".into(),
+            target: "/tmp/share".into(),
+            readonly: false,
+        });
+        assert!(
+            validate(&standard)
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps /tmp")
+        );
     }
 
     #[test]

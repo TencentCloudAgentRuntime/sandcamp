@@ -41,7 +41,7 @@ RUSTFLAGS='-C linker=rust-lld' \
 campd/sandrun 单元测试覆盖：
 
 - runtime declaration v3 严格反序列化、v2 兼容与更旧版本拒绝；
-- Main/Sidecar 字段、Kind、用户、Bind、路径、环境和预算校验；
+- Main/Sidecar 字段、Kind、用户、公开 Bind Mount、路径、环境和预算校验；
 - campd 构造 sandrun argv；
 - Readiness 成功/失败阈值与恢复；
 - sandrun 参数、Bind/tmpfs 目标、WorkDir、用户名和数字身份校验。
@@ -67,7 +67,7 @@ task test:stack-linux
 
 - immutable OCI lower 与 OverlayFS Copy-on-Write；
 - upper 根目录继承 lower `/` 的 UID、GID 和 Mode；
-- writable/readonly Bind、tmpfs 与标准挂载；
+- 公开 `Process.Mounts` 生成的 writable/readonly Bind、tmpfs 与标准挂载；
 - `pivot_root` 后 WorkDir；
 - glibc、musl 与静态二进制；
 - Overlay Identity 锁、并发拒绝和重启复用；

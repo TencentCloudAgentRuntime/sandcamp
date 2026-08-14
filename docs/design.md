@@ -113,6 +113,11 @@ Main 直接在主 Mount Namespace 中执行，可访问主镜像 RootFS 和 Tool
 Sidecar 通过与 campd 同目录的 sandrun 执行。
 campd 不依赖主镜像的 PATH 查找 Runtime 二进制。
 
+公开 SDK 的 `Process.Mounts` 只允许 Sidecar 使用。其 Source 在 campd 所在的主 Mount
+Namespace 中解析，Target 在 Sidecar 合并后的 OverlayFS RootFS 中解析；Bind 完成后
+再执行 `pivot_root`。因此旧 RootFS 被卸载后，Target 仍持有同一 Source 文件树的挂载
+引用。不同 Sidecar 可以把同一个 Source 挂到不同 Target，并分别选择读写或只读。
+
 ### Service
 
 - 无 Probe：`spawn` 成功即允许处理下一项；PID 存活代表该 Service Ready；
@@ -185,7 +190,12 @@ Overlay Identity 使用 `overlay-id + canonical rootfs` 的 SHA-256，写层位�
 状态。文件锁禁止同一 Identity 并发挂载。
 
 标准挂载包括 `/proc`、沙箱 `/dev`、只读 `/sys`、可写 tmpfs `/tmp` 与 `/run`，以及
-只读注入的 hosts/resolv.conf。应用共享目录仍需显式 Bind。
+只读注入的 hosts/resolv.conf。应用共享目录通过 `Process.Mounts` 显式 Bind。普通文件
+修改会在共享方之间立即可见；Bind 是非递归的，不传播 Source 下后来新增的子挂载。
+
+Bind Source 可以来自主镜像 RootFS 或 Tool StorageMount。Sidecar 自己的 Overlay upper
+只存在于它的私有 Mount Namespace，不能直接共享给其他 Sidecar；需要共享可写数据时，
+应把同一个 Main/Tool 路径 Bind 给所有参与进程。
 
 ## 环境与用户
 

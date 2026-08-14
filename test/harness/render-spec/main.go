@@ -62,7 +62,18 @@ func main() {
 					"SANDCAMP_SIDECAR_ENV":    "from-process-spec",
 				},
 				Expose: []int{9200},
-				Probe:  readinessProbe("/healthz", 9200, 16*time.Second),
+				Mounts: []sandcamp.BindMount{
+					{
+						Source: "/sandcamp-validation/share",
+						Target: "/mnt/share",
+					},
+					{
+						Source:   "/sandcamp-validation/config/probe.txt",
+						Target:   "/etc/sandcamp-validation/probe.txt",
+						ReadOnly: true,
+					},
+				},
+				Probe: readinessProbe("/healthz", 9200, 16*time.Second),
 			},
 		},
 		Main: []sandcamp.Process{mainProcess},
@@ -74,17 +85,6 @@ func main() {
 		"fastapi": {
 			RootFS:         "/mnt/fastapi",
 			StandardMounts: true,
-			Binds: []testwire.Bind{
-				{
-					Source: "/sandcamp-validation/share",
-					Target: "/mnt/share",
-				},
-				{
-					Source:   "/sandcamp-validation/config/probe.txt",
-					Target:   "/etc/sandcamp-validation/probe.txt",
-					ReadOnly: true,
-				},
-			},
 		},
 	})
 	if err != nil {

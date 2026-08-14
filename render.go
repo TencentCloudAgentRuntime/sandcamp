@@ -98,10 +98,11 @@ type runtimeProcess struct {
 
 type runtimeSidecar struct {
 	runtimeProcess
-	RootFS         string       `json:"rootfs"`
-	OverlayDevice  string       `json:"overlay_device,omitempty"`
-	StandardMounts bool         `json:"standard_mounts"`
-	User           *runtimeUser `json:"user,omitempty"`
+	RootFS         string        `json:"rootfs"`
+	OverlayDevice  string        `json:"overlay_device,omitempty"`
+	StandardMounts bool          `json:"standard_mounts"`
+	Binds          []runtimeBind `json:"binds,omitempty"`
+	User           *runtimeUser  `json:"user,omitempty"`
 }
 
 type runtimeMain struct {
@@ -113,6 +114,12 @@ type runtimeUser struct {
 	Name *string `json:"name,omitempty"`
 	UID  *uint32 `json:"uid,omitempty"`
 	GID  *uint32 `json:"gid,omitempty"`
+}
+
+type runtimeBind struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
 type runtimeProbe struct {
@@ -153,9 +160,25 @@ func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
 		RootFS:         image.mountPath,
 		OverlayDevice:  defaultOverlayDevicePath,
 		StandardMounts: true,
+		Binds:          toRuntimeBinds(process.Mounts),
 	}
 	if process.User != nil {
 		result.User = toRuntimeUser(*process.User)
+	}
+	return result
+}
+
+func toRuntimeBinds(mounts []BindMount) []runtimeBind {
+	if len(mounts) == 0 {
+		return nil
+	}
+	result := make([]runtimeBind, 0, len(mounts))
+	for _, mount := range mounts {
+		result = append(result, runtimeBind{
+			Source:   mount.Source,
+			Target:   mount.Target,
+			ReadOnly: mount.ReadOnly,
+		})
 	}
 	return result
 }

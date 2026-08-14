@@ -38,13 +38,13 @@ Readiness 场景则可以直接使用受管 Observer。
 
 ## 场景
 
-当前共有 53 个场景：
+当前共有 54 个场景：
 
 | 范围 | 数量 | 主要内容 |
 | --- | ---: | --- |
 | 启动、组合与 Readiness | 9 | Sidecar-only、多 Main、Main/Sidecar Init Job、无 Probe Service、持续降级/恢复 |
 | 身份与权限 | 6 | Main/Sidecar 命名与数字身份、显式 root 权限语义 |
-| 文件系统、进程与网络 | 10 | Overlay、argv/env/workdir、HTTP 双向 Loopback、UDP、公网、Fanout、子进程拓扑、Netfilter 写入 |
+| 文件系统、进程与网络 | 11 | Overlay、跨 RootFS Bind 共享、argv/env/workdir、HTTP 双向 Loopback、UDP、公网、Fanout、子进程拓扑、Netfilter 写入 |
 | 生命周期与边界 | 6 | Main/Sidecar 独立退出、同组清理、TERM→KILL、`setsid`、共享 Probe 端点 |
 | 真实镜像、网络策略与额外挂载 | 14 | FastAPI、Nginx Main 反向代理、Egress HTTP/HTTPS/通配符/默认策略/规则安装与清理、envd |
 | 非法启动 | 8 | Main/Sidecar 用户缺失、命令缺失、Probe 超时、启动崩溃、Job 非零与超时 |

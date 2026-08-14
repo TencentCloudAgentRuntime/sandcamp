@@ -101,6 +101,12 @@ func TestRenderStartEncodesDeclarativeRuntimeSpec(t *testing.T) {
 		fastAPI.ReadinessProbe.SuccessThreshold != 2 {
 		t.Fatalf("fastapi readiness probe = %#v", fastAPI.ReadinessProbe)
 	}
+	if want := []runtimeBind{
+		{Source: "/mnt/share", Target: "/mnt/share"},
+		{Source: "/etc/sandcamp/proxy.json", Target: "/opt/fastapi-proxy/proxy.json", ReadOnly: true},
+	}; !reflect.DeepEqual(fastAPI.Binds, want) {
+		t.Fatalf("fastapi bind mounts = %#v, want %#v", fastAPI.Binds, want)
+	}
 
 	prepare := decoded.Main[0]
 	if prepare.Kind != RunToCompletion || prepare.CompletionTimeoutMS != 2_000 {
@@ -326,6 +332,54 @@ func TestRenderStartValidation(t *testing.T) {
 			},
 			want: ErrInvalidSpec,
 		},
+		{
+			name: "main bind mount",
+			edit: func(spec *Spec) {
+				spec.Main[1].Mounts = []BindMount{{Source: "/mnt/share", Target: "/mnt/share"}}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "relative bind source",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].Mounts = []BindMount{{Source: "mnt/share", Target: "/mnt/share"}}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "root bind target",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].Mounts = []BindMount{{Source: "/mnt/share", Target: "/"}}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "duplicate bind target",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].Mounts = []BindMount{
+					{Source: "/mnt/share-a", Target: "/mnt/share"},
+					{Source: "/mnt/share-b", Target: "/mnt/share"},
+				}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "overlapping bind targets",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].Mounts = []BindMount{
+					{Source: "/mnt/share-a", Target: "/mnt/share"},
+					{Source: "/mnt/share-b", Target: "/mnt/share/cache"},
+				}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "bind target overlaps standard mount",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].Mounts = []BindMount{{Source: "/mnt/share", Target: "/tmp/share"}}
+			},
+			want: ErrInvalidSpec,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -430,6 +484,14 @@ func referenceSpec() Spec {
 				WorkDir: "/opt/fastapi-proxy",
 				User:    &ProcessUser{Name: "app"},
 				Expose:  []int{9200},
+				Mounts: []BindMount{
+					{Source: "/mnt/share", Target: "/mnt/share"},
+					{
+						Source:   "/etc/sandcamp/proxy.json",
+						Target:   "/opt/fastapi-proxy/proxy.json",
+						ReadOnly: true,
+					},
+				},
 				Probe: &ReadinessProbe{
 					Path:             "/healthz",
 					Port:             9200,

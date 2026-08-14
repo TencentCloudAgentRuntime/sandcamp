@@ -151,10 +151,39 @@ Job 超时时 campd 先向该 Job 进程组发送 SIGTERM，5 秒后仍存在则
 
 ## 7. Bind 失败
 
+`Process.Mounts[].Source` 在主 Mount Namespace 中解析，`Target` 在对应 Sidecar RootFS
+中解析。Main 不能配置 `Mounts`。
+
+### Source 不存在
+
+Sidecar 总是在 Main 进程之前处理，因此不能由后续 Main 进程创建 Source。将目录或文件
+预置在主镜像中，或通过 Tool StorageMount 在 Sidecar 启动前提供。
+
 ### Source/Target 类型不匹配
 
 目录只能 Bind 到目录，文件只能 Bind 到文件。Target 必须提前存在于 Sidecar
 镜像中。
+
+### Target 与标准挂载重叠
+
+不能把 Target 放在 `/tmp/cache`、`/run/app` 等标准挂载内部，也不能覆盖
+`/etc/hosts` 或 `/etc/resolv.conf`。选择独立路径，例如 `/mnt/share` 或 `/data`。
+
+### `mount` 把 Bind 显示为 `overlay` 或 `overlay2`
+
+这是正常现象。Bind Mount 不创建新文件系统，只为 Source 对应的 VFS 子树增加一个挂载
+引用；`mount` 通常显示 Source 所属的底层文件系统，而不是原始 Source 路径。例如 Main
+RootFS 是 OverlayFS 时，Sidecar 内可能显示 `overlay2 on /var/tmp type overlay`。
+
+可以读取目标进程的 `mountinfo`。Bind 记录的 root 字段会是 Source 在底层文件系统中的
+路径，mount point 字段则是 Sidecar Target：
+
+```bash
+grep ' /var/tmp ' /proc/$sidecar_pid/mountinfo
+```
+
+再分别从 Main 和 Sidecar 对同一文件执行 `stat -c '%d:%i'`；device 与 inode 相同即可
+确认双方看到的是同一个 Bind 文件，而不是两份复制数据。
 
 ### 只读 Bind 仍可写
 

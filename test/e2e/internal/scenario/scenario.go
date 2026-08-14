@@ -128,6 +128,7 @@ func Core() []Scenario {
 		sidecarInitJob(),
 		continuousReadiness(),
 		overlayIsolation(),
+		sharedBindMount(),
 		argvEnvironmentWorkdir(),
 		loopbackHTTP(),
 		mainToSidecarHTTP(),

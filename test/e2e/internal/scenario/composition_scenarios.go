@@ -1,11 +1,108 @@
 package scenario
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/TencentCloudAgentRuntime/sandcamp"
 	"github.com/TencentCloudAgentRuntime/sandcamp/test/e2e/internal/model"
 )
+
+func sharedBindMount() Scenario {
+	const (
+		sharedRoot   = "/work/app"
+		observerFile = sharedRoot + "/from-observer.txt"
+		workerFile   = sharedRoot + "/from-worker.txt"
+		mainFile     = sharedRoot + "/from-main.txt"
+		deniedFile   = sharedRoot + "/readonly-write-must-fail.txt"
+	)
+	evidencePaths := strings.Join([]string{observerFile, workerFile, mainFile, deniedFile}, ",")
+	readWriteMount := []sandcamp.BindMount{{Source: sharedRoot, Target: sharedRoot}}
+	readOnlyMount := []sandcamp.BindMount{{Source: sharedRoot, Target: sharedRoot, ReadOnly: true}}
+
+	return Scenario{
+		Name:          "shared-bind-mount",
+		Category:      "filesystem",
+		Description:   "Bind one main-image directory into multiple sidecars and verify shared writes plus a read-only view.",
+		ExpectedState: ExpectedRunning,
+		Build: func(runID, token string) sandcamp.Spec {
+			observer := observerProcess(runID, token)
+			observer.Command = append(observer.Command, "--write", observerFile+"=from-observer")
+			observer.Env[model.FilesEnvironment] = evidencePaths
+			observer.Mounts = readWriteMount
+
+			worker := workerProcess("worker-a", 18082, runID, token, "--write", workerFile+"=from-worker")
+			worker.Env[model.FilesEnvironment] = evidencePaths
+			worker.Mounts = readWriteMount
+
+			readOnly := process(
+				"worker-b",
+				[]string{
+					"/bin/sh",
+					"-c",
+					fmt.Sprintf(
+						"if printf 'unexpected' > %s 2>/dev/null; then exit 90; fi; exec %s serve --name worker-b --listen 127.0.0.1:18083",
+						deniedFile,
+						AgentPath,
+					),
+				},
+				18083,
+				runID,
+				token,
+			)
+			readOnly.Env[model.FilesEnvironment] = evidencePaths
+			readOnly.Mounts = readOnlyMount
+
+			main := mainProcess(runID, token)
+			main.Command = append(main.Command, "--write", mainFile+"=from-main")
+			main.Env[model.FilesEnvironment] = evidencePaths
+
+			return sandcamp.Spec{
+				Sidecars: []sandcamp.Process{observer, worker, readOnly},
+				Main:     []sandcamp.Process{main},
+			}
+		},
+		Validate: func(snapshot model.Snapshot, _ map[string]model.FetchResult) []Check {
+			processes := indexProcesses(snapshot.Processes)
+			checks := []Check{
+				checkProcessNames(processes, "observer", "worker-a", "worker-b", "main"),
+				eventOrderCheck(snapshot.Events, "observer", "worker-a", "worker-b", "main"),
+			}
+			expected := []struct {
+				path    string
+				content string
+			}{
+				{path: observerFile, content: "from-observer"},
+				{path: workerFile, content: "from-worker"},
+				{path: mainFile, content: "from-main"},
+			}
+			for _, processName := range []string{"observer", "worker-a", "worker-b", "main"} {
+				process, found := processes[processName]
+				if !found {
+					continue
+				}
+				for _, item := range expected {
+					file := process.Files[item.path]
+					checks = append(checks, equalCheck(
+						processName+"-reads-"+strings.TrimSuffix(strings.TrimPrefix(item.path, sharedRoot+"/"), ".txt"),
+						file.Error == "" && file.Content == item.content,
+						processName+" reads the shared file written by its peer",
+						file,
+					))
+				}
+			}
+			denied := processes["main"].Files[deniedFile]
+			checks = append(checks, equalCheck(
+				"readonly-bind-blocks-write",
+				denied.Error != "",
+				"the read-only sidecar cannot create a file in the shared directory",
+				denied,
+			))
+			return checks
+		},
+	}
+}
 
 func sidecarOnly() Scenario {
 	return Scenario{

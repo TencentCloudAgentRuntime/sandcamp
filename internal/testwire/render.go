@@ -12,17 +12,10 @@ import (
 	ags "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ags/v20250920"
 )
 
-type Bind struct {
-	Source   string `json:"source"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"readonly,omitempty"`
-}
-
 type SidecarRuntime struct {
 	RootFS         string
 	OverlayDevice  string
 	StandardMounts bool
-	Binds          []Bind
 }
 
 type runtimeSpec struct {
@@ -43,11 +36,11 @@ type runtimeProcess struct {
 
 type runtimeSidecar struct {
 	runtimeProcess
-	RootFS         string       `json:"rootfs"`
-	OverlayDevice  string       `json:"overlay_device,omitempty"`
-	StandardMounts bool         `json:"standard_mounts"`
-	Binds          []Bind       `json:"binds,omitempty"`
-	User           *runtimeUser `json:"user,omitempty"`
+	RootFS         string        `json:"rootfs"`
+	OverlayDevice  string        `json:"overlay_device,omitempty"`
+	StandardMounts bool          `json:"standard_mounts"`
+	Binds          []runtimeBind `json:"binds,omitempty"`
+	User           *runtimeUser  `json:"user,omitempty"`
 }
 
 type runtimeMain struct {
@@ -59,6 +52,12 @@ type runtimeUser struct {
 	Name *string `json:"name,omitempty"`
 	UID  *uint32 `json:"uid,omitempty"`
 	GID  *uint32 `json:"gid,omitempty"`
+}
+
+type runtimeBind struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
 type runtimeProbe struct {
@@ -144,7 +143,7 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 			RootFS:         configured.RootFS,
 			OverlayDevice:  configured.OverlayDevice,
 			StandardMounts: configured.StandardMounts,
-			Binds:          append([]Bind(nil), configured.Binds...),
+			Binds:          toRuntimeBinds(process.Mounts),
 		}
 		if process.User != nil {
 			rendered.User = toRuntimeUser(*process.User)
@@ -163,6 +162,21 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 		return "", fmt.Errorf("encode test runtime declaration: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(encoded), nil
+}
+
+func toRuntimeBinds(mounts []sandcamp.BindMount) []runtimeBind {
+	if len(mounts) == 0 {
+		return nil
+	}
+	result := make([]runtimeBind, 0, len(mounts))
+	for _, mount := range mounts {
+		result = append(result, runtimeBind{
+			Source:   mount.Source,
+			Target:   mount.Target,
+			ReadOnly: mount.ReadOnly,
+		})
+	}
+	return result
 }
 
 func toRuntimeUser(user sandcamp.ProcessUser) *runtimeUser {
