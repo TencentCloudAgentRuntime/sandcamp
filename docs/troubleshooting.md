@@ -154,15 +154,16 @@ Job 超时时 campd 先向该 Job 进程组发送 SIGTERM，5 秒后仍存在则
 `Process.Mounts[].Source` 在主 Mount Namespace 中解析，`Target` 在对应 Sidecar RootFS
 中解析。Main 不能配置 `Mounts`。
 
-### Source 不存在
+### Source 自动创建失败
 
-Sidecar 总是在 Main 进程之前处理，因此不能由后续 Main 进程创建 Source。将目录或文件
-预置在主镜像中，或通过 Tool StorageMount 在 Sidecar 启动前提供。
+Source 不存在时会连同缺失父目录自动创建为 `0777` 目录。若其父路径不可写、位于只读
+挂载，或路径中已有普通文件，会创建失败。缺失 Source 不会自动创建为普通文件；文件
+Source 必须预先提供。
 
 ### Source/Target 类型不匹配
 
-目录只能 Bind 到目录，文件只能 Bind 到文件。Target 必须提前存在于 Sidecar
-镜像中。
+目录只能 Bind 到目录，文件只能 Bind 到文件。Target 不存在时会根据 Source 类型在
+Sidecar OverlayFS 中自动创建；Target 已存在时必须与 Source 类型一致且不会被修改。
 
 ### Target 与标准挂载重叠
 

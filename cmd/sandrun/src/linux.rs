@@ -7,7 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +17,8 @@ const OVERLAY_DEVICE_MOUNT: &str = "/var/lib/sandcamp/overlay-device";
 const OVERLAY_DEVICE_NAMESPACE: &str = "sandcamp/overlay/v1";
 const MAX_PASSWD_BYTES: u64 = 1024 * 1024;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+const CREATED_DIRECTORY_MODE: u32 = 0o777;
+const CREATED_FILE_MODE: u32 = 0o666;
 
 struct PreparedBind {
     source: PathBuf,
@@ -83,12 +85,14 @@ pub(crate) fn run(config: Config) -> Result<(), RuntimeError> {
         None => None,
     };
 
+    prepare_bind_sources(&config.binds)?;
     unshare_mount_namespace()?;
     make_mounts_private()?;
     let overlay_base = prepare_overlay_base(config.overlay_device.as_deref())?;
     let overlay = mount_overlay_rootfs(&lower, &overlay_base, config.overlay_id.as_deref())?;
     let rootfs = &overlay.merged;
 
+    prepare_bind_targets(rootfs, &config.binds)?;
     prepare_workdir(rootfs, &config.workdir)?;
     prepare_executable(rootfs, Path::new(&config.command[0]))?;
     validate_resolved_mount_targets(rootfs, &config)?;
@@ -698,6 +702,274 @@ fn prepare_bind(rootfs: &Path, bind: &Bind) -> Result<PreparedBind, RuntimeError
 
 fn prepare_recursive_bind(rootfs: &Path, bind: &Bind) -> Result<PreparedBind, RuntimeError> {
     prepare_bind_with_recursion(rootfs, bind, true)
+}
+
+fn prepare_bind_sources(binds: &[Bind]) -> Result<(), RuntimeError> {
+    for bind in binds {
+        match fs::canonicalize(&bind.source) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                ensure_bind_source_directory(&bind.source)?;
+            }
+            Err(error) => {
+                return Err(RuntimeError::operation(
+                    "bind_source_resolve_failed",
+                    bind.source.clone(),
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_bind_source_directory(source: &Path) -> Result<(), RuntimeError> {
+    let mut current = PathBuf::from("/");
+    for component in source.components() {
+        let Component::Normal(name) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(RuntimeError::operation(
+                "bind_source_create_failed",
+                source.to_path_buf(),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bind source must be a clean absolute path",
+                ),
+            ));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let metadata = fs::metadata(&current).map_err(|error| {
+                    RuntimeError::operation("bind_source_stat_failed", current.clone(), error)
+                })?;
+                if !metadata.is_dir() {
+                    return Err(RuntimeError::operation(
+                        "bind_source_create_failed",
+                        current,
+                        io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "bind source path component is not a directory",
+                        ),
+                    ));
+                }
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(RuntimeError::operation(
+                    "bind_source_create_failed",
+                    current,
+                    io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        "bind source path component is not a directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_directory(
+                    &current,
+                    "bind_source_create_failed",
+                    "bind_source_chmod_failed",
+                )?;
+                let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                    RuntimeError::operation("bind_source_stat_failed", current.clone(), error)
+                })?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(RuntimeError::operation(
+                        "bind_source_create_failed",
+                        current,
+                        io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "bind source path component is not a real directory",
+                        ),
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(RuntimeError::operation(
+                    "bind_source_stat_failed",
+                    current,
+                    error,
+                ));
+            }
+        }
+    }
+    fs::canonicalize(source).map(|_| ()).map_err(|error| {
+        RuntimeError::operation("bind_source_resolve_failed", source.to_path_buf(), error)
+    })
+}
+
+fn prepare_bind_targets(rootfs: &Path, binds: &[Bind]) -> Result<(), RuntimeError> {
+    for bind in binds {
+        ensure_bind_target(rootfs, bind)?;
+    }
+    Ok(())
+}
+
+fn ensure_bind_target(rootfs: &Path, bind: &Bind) -> Result<(), RuntimeError> {
+    let source = fs::canonicalize(&bind.source).map_err(|error| {
+        RuntimeError::operation("bind_source_resolve_failed", bind.source.clone(), error)
+    })?;
+    let source_metadata = fs::metadata(&source).map_err(|error| {
+        RuntimeError::operation("bind_source_stat_failed", source.clone(), error)
+    })?;
+    let parent = bind
+        .target
+        .parent()
+        .ok_or_else(|| RuntimeError::InvalidMountTarget {
+            target: bind.target.clone(),
+            reason: "bind target has no parent",
+        })?;
+    let parent = ensure_bind_target_directory(rootfs, parent)?;
+    let name = bind
+        .target
+        .file_name()
+        .ok_or_else(|| RuntimeError::InvalidMountTarget {
+            target: bind.target.clone(),
+            reason: "bind target has no file name",
+        })?;
+    let target = parent.join(name);
+
+    match fs::symlink_metadata(&target) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RuntimeError::operation(
+                "bind_target_stat_failed",
+                target,
+                error,
+            ));
+        }
+    }
+
+    let (result, mode) = if source_metadata.is_dir() {
+        (
+            DirBuilder::new()
+                .mode(CREATED_DIRECTORY_MODE)
+                .create(&target),
+            CREATED_DIRECTORY_MODE,
+        )
+    } else if source_metadata.is_file() {
+        (
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(CREATED_FILE_MODE)
+                .open(&target)
+                .map(|_| ()),
+            CREATED_FILE_MODE,
+        )
+    } else {
+        return Err(RuntimeError::InvalidMountTarget {
+            target: bind.target.clone(),
+            reason: "missing bind target cannot be created for this source type",
+        });
+    };
+    match result {
+        Ok(()) => fs::set_permissions(&target, fs::Permissions::from_mode(mode))
+            .map_err(|error| RuntimeError::operation("bind_target_chmod_failed", target, error)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(RuntimeError::operation(
+            "bind_target_create_failed",
+            target,
+            error,
+        )),
+    }
+}
+
+fn ensure_bind_target_directory(rootfs: &Path, target: &Path) -> Result<PathBuf, RuntimeError> {
+    let mut logical = PathBuf::from("/");
+    let mut resolved = rootfs.to_path_buf();
+    for component in target.components() {
+        let Component::Normal(name) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(RuntimeError::InvalidMountTarget {
+                target: target.to_path_buf(),
+                reason: "bind target parent escapes rootfs",
+            });
+        };
+        logical.push(name);
+        let candidate = resolved.join(name);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                resolved = resolve_target(rootfs, &logical)?;
+                let metadata = fs::metadata(&resolved).map_err(|error| {
+                    RuntimeError::operation(
+                        "bind_target_parent_stat_failed",
+                        resolved.clone(),
+                        error,
+                    )
+                })?;
+                if !metadata.is_dir() {
+                    return Err(RuntimeError::InvalidMountTarget {
+                        target: logical,
+                        reason: "bind target parent is not a directory",
+                    });
+                }
+            }
+            Ok(metadata) if metadata.is_dir() => resolved = candidate,
+            Ok(_) => {
+                return Err(RuntimeError::InvalidMountTarget {
+                    target: logical,
+                    reason: "bind target parent is not a directory",
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_directory(
+                    &candidate,
+                    "bind_target_parent_create_failed",
+                    "bind_target_parent_chmod_failed",
+                )?;
+                let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+                    RuntimeError::operation(
+                        "bind_target_parent_stat_failed",
+                        candidate.clone(),
+                        error,
+                    )
+                })?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(RuntimeError::InvalidMountTarget {
+                        target: logical,
+                        reason: "bind target parent is not a real directory",
+                    });
+                }
+                resolved = candidate;
+            }
+            Err(error) => {
+                return Err(RuntimeError::operation(
+                    "bind_target_parent_stat_failed",
+                    candidate,
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn create_directory(
+    path: &Path,
+    create_operation: &'static str,
+    chmod_operation: &'static str,
+) -> Result<(), RuntimeError> {
+    match DirBuilder::new().mode(CREATED_DIRECTORY_MODE).create(path) {
+        Ok(()) => {
+            fs::set_permissions(path, fs::Permissions::from_mode(CREATED_DIRECTORY_MODE)).map_err(
+                |error| RuntimeError::operation(chmod_operation, path.to_path_buf(), error),
+            )?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(RuntimeError::operation(
+            create_operation,
+            path.to_path_buf(),
+            error,
+        )),
+    }
 }
 
 fn prepare_bind_with_recursion(

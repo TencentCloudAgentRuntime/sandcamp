@@ -20,9 +20,9 @@ Options:
   --uid UID              Explicit numeric user ID (requires --gid)
   --gid GID              Explicit numeric primary group ID (requires --uid)
   --standard-mounts      Add proc, dev, read-only sys/DNS, tmpfs /tmp and /run
-  --bind SOURCE TARGET   Bind an existing host path read-write
+  --bind SOURCE TARGET   Bind a host path read-write; create missing paths
   --ro-bind SOURCE TARGET
-                         Bind an existing host path read-only
+                         Bind a host path read-only; create missing paths
   --tmpfs TARGET         Mount a mode=0755 tmpfs at an existing directory
   -h, --help             Print this help
   -V, --version          Print version
@@ -30,6 +30,7 @@ Options:
 sandrun creates only a mount namespace. Network, PID, process group, cgroup,
 environment, file descriptors, and capabilities are inherited. The mount
 namespace and root switch provide dependency correctness, not a security boundary.
+Missing bind sources are created as directories; targets match their sources.
 ";
 
 const STANDARD_TARGETS: [&str; 7] = [

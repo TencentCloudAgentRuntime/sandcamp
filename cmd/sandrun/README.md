@@ -85,9 +85,11 @@ OverlayFS 允许 sandrun 在不修改只读 Image Volume 的前提下创建目�
 显式声明的 `--bind` 和 `--ro-bind` 均为非递归挂载。标准 `/dev` 挂载是递归的，
 以便保留 `devpts` 等设备子挂载。
 
-除自动生成的 DNS 和 Hosts 文件外，所有显式挂载目标都必须提前存在于根文件系统
-中。普通镜像路径的写入由 OverlayFS 自动 Copy-on-Write；需要与主进程共享或独立
-持久化的数据仍应使用显式 `--bind`。
+Source 缺失时，sandrun 会在主 Mount Namespace 中将它及缺失父级创建为 `0777`
+目录；缺失 Source 若应为普通文件则必须提前创建。Target 缺失时，会在 OverlayFS
+写层中按 Source 类型创建，目录使用 `0777`、普通文件使用 `0666`。已有路径不会被
+chmod/chown。普通镜像路径的写入由 OverlayFS 自动 Copy-on-Write；需要与主进程共享
+或独立持久化的数据仍应使用显式 `--bind`。
 
 挂载镜像只会提供文件，不会提供 OCI 运行配置。`Entrypoint`、`Cmd`、`Env`、
 `User`、`WorkingDir`、`Healthcheck` 和所需 Capabilities 都必须显式转换为进程

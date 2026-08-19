@@ -116,7 +116,10 @@ campd 不依赖主镜像的 PATH 查找 Runtime 二进制。
 公开 SDK 的 `Process.Mounts` 只允许 Sidecar 使用。其 Source 在 campd 所在的主 Mount
 Namespace 中解析，Target 在 Sidecar 合并后的 OverlayFS RootFS 中解析；Bind 完成后
 再执行 `pivot_root`。因此旧 RootFS 被卸载后，Target 仍持有同一 Source 文件树的挂载
-引用。不同 Sidecar 可以把同一个 Source 挂到不同 Target，并分别选择读写或只读。
+引用。缺失 Source 及其父级在主 Mount Namespace 中创建为 `0777` 目录；缺失 Target
+及其父级在 Overlay 写层中按 Source 类型创建，因而不要求修改原始 Sidecar 镜像。
+已有路径不会改权限。不同 Sidecar 可以把同一个 Source 挂到不同 Target，并分别选择
+读写或只读。
 
 ### Service
 
