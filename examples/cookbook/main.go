@@ -55,6 +55,8 @@ const (
 	envdSubPath   = "/usr/bin/envd"
 	envdMountPath = "/mnt/envd-runtime/envd"
 	envdPort      = 49983
+	sharedSource  = "/sandcamp-share/source"
+	sharedTarget  = "/sandcamp-share/egress"
 )
 
 func main() {
@@ -120,12 +122,12 @@ func main() {
 				"PATH":                         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			},
 			// Source 从主 Mount Namespace 解析，Target 从 Egress RootFS
-			// 解析。两个公开上游镜像都预先包含 /var/tmp，因此不需要制作
-			// 派生镜像。Sidecar 启动后，双方看到的是同一目录和同一批 inode；
+			// 解析。两个路径都故意不预置，由 sandrun 自动创建为 0777
+			// 目录。Sidecar 启动后，双方看到的是同一目录和同一批 inode；
 			// ReadOnly 省略时为 false，Main 与 Egress 都可以写入。
 			Mounts: []sandcamp.BindMount{{
-				Source: "/var/tmp",
-				Target: "/var/tmp",
+				Source: sharedSource,
+				Target: sharedTarget,
 			}},
 			// Expose 把 24774 写入 AGS 的对外端口配置；沙箱内部通过共享
 			// Loopback 访问端口时不需要 Expose。
@@ -156,14 +158,14 @@ func main() {
 				Command: []string{
 					"/usr/local/bin/bash",
 					"-c",
-					`ln -sf /usr/local/bin/bash /bin/bash
-printf 'created by Main\n' > /var/tmp/sandcamp-from-main.txt
+					fmt.Sprintf(`ln -sf /usr/local/bin/bash /bin/bash
+printf 'created by Main\n' > %s/sandcamp-from-main.txt
 cat > /tmp/sandcamp-http-response <<'EOF'
 #!/usr/local/bin/bash
 printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nsandcamp main ok\n'
 EOF
 chmod 0755 /tmp/sandcamp-http-response
-exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`,
+exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`, sharedSource),
 				},
 				WorkDir: "/",
 				Expose:  []int{8080},
@@ -366,22 +368,27 @@ exec /usr/bin/nc -lk -p 8080 -e /tmp/sandcamp-http-response`,
   nslookup example.com
   nslookup example.org  # 预期被 Egress 策略拒绝
 
-验证 Main 与 Egress Sidecar 共享 /var/tmp：
+验证自动创建的 Source 与 Egress Target：
   egress_pid="$(ps -o pid,args | awk '$2 == "/opt/opensandbox-egress/supervisor" {print $1; exit}')"
   echo "egress supervisor pid=$egress_pid"
 
+  stat -c 'Source: %%a %%u:%%g %%n' /sandcamp-share/source
+  nsenter -t "$egress_pid" -m -r -w -- \
+    stat -c 'Target: %%a %%u:%%g %%n' /sandcamp-share/egress
+
   # Main 启动时写入，进入 Egress 的 Mount Namespace 后可以直接读取。
-  cat /var/tmp/sandcamp-from-main.txt
-  nsenter -t "$egress_pid" -m -r -w -- cat /var/tmp/sandcamp-from-main.txt
+  cat /sandcamp-share/source/sandcamp-from-main.txt
+  nsenter -t "$egress_pid" -m -r -w -- \
+    cat /sandcamp-share/egress/sandcamp-from-main.txt
 
   # 从 Egress RootFS 写入，同一文件立即出现在 Main 中。
   nsenter -t "$egress_pid" -m -r -w -- /bin/sh -c \
-    'printf "created by Egress Sidecar\n" > /var/tmp/sandcamp-from-egress.txt'
-  cat /var/tmp/sandcamp-from-egress.txt
+    'printf "created by Egress Sidecar\n" > /sandcamp-share/egress/sandcamp-from-egress.txt'
+  cat /sandcamp-share/source/sandcamp-from-egress.txt
 
   # 两边的 device:inode 相同，说明它是 Bind 共享，不是文件复制。
-  stat -c 'Main: %%d:%%i %%n' /var/tmp/sandcamp-from-egress.txt
+  stat -c 'Main: %%d:%%i %%n' /sandcamp-share/source/sandcamp-from-egress.txt
   nsenter -t "$egress_pid" -m -r -w -- \
-    stat -c 'Sidecar: %%d:%%i %%n' /var/tmp/sandcamp-from-egress.txt
+    stat -c 'Sidecar: %%d:%%i %%n' /sandcamp-share/egress/sandcamp-from-egress.txt
 `, instanceID)
 }

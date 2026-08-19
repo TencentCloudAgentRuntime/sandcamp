@@ -80,9 +80,12 @@ type Process struct {
 	Timeout time.Duration   // RunToCompletion only.
 }
 
-// BindMount shares one existing path from the sandbox's main Mount Namespace
-// with a Sidecar. Source and Target must both exist when the Sidecar starts and
-// must have matching file types. Bind mounts do not remap ownership.
+// BindMount shares a path from the sandbox's main Mount Namespace with a
+// Sidecar. A missing Source and its parents are created as mode 0777 directories.
+// A missing Target is created in the Sidecar's writable overlay with the same
+// file type as Source; missing directories use mode 0777 and regular files use
+// mode 0666. Existing paths are not modified and must have compatible file
+// types. Bind mounts do not remap ownership.
 type BindMount struct {
 	Source   string
 	Target   string

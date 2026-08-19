@@ -218,7 +218,12 @@ Mounts: []sandcamp.BindMount{{
 绝对路径，可以来自主镜像 RootFS 或 Tool StorageMount；Target 是 Sidecar RootFS
 中的绝对路径。sandrun 在 Sidecar OverlayFS 上完成 Bind 后才执行 `pivot_root`。
 
-- Source 和 Target 必须提前存在，并且目录对应目录、文件对应文件；
+- Source 缺失时，sandrun 会在主 Mount Namespace 中将 Source 及其缺失父级创建为
+  `0777` 目录；若 Source 需要是普通文件，必须提前创建；
+- Target 缺失时，sandrun 会在 Sidecar OverlayFS 中按 Source 类型创建：目录及其
+  缺失父级使用 `0777`，普通文件使用 `0666`；
+- 已存在的 Source、Target 和父目录不会被 chmod/chown；Target 必须与 Source 类型
+  一致，即目录对应目录、文件对应文件；
 - Source、Target 都必须是规范化绝对路径，且不能是 `/`；
 - Target 不能重复、互相包含，或与 `/proc`、`/dev`、`/sys`、`/tmp`、`/run`、
   `/etc/hosts`、`/etc/resolv.conf` 等标准挂载重叠；
@@ -227,8 +232,8 @@ Mounts: []sandcamp.BindMount{{
 - 多个 Sidecar Bind 同一 Source 时共享文件修改；
 - Sidecar 私有 Overlay upper 不在主 Mount Namespace 中，不能作为其他 Sidecar 的共享源。
 
-因为 Sidecar 在 Main 进程之前启动，Source 不能依赖后续 Main 进程创建。需要动态共享
-数据时，应让 Source 预先存在于主镜像或 Tool StorageMount 中，再 Bind 给各 Sidecar。
+因为 Sidecar 在 Main 进程之前启动，缺失的目录 Source 由第一个使用它的 Sidecar
+预先创建，后续 Sidecar 和 Main 都能看到同一目录。位于只读挂载中的 Source 无法创建。
 
 ### `User`
 

@@ -90,6 +90,7 @@ docker volume create "$state_volume" >/dev/null
 docker volume create "$overlay_volume" >/dev/null
 docker run --rm --platform linux/amd64 -v "$state_volume:/state" "$ALPINE_IMAGE" \
   sh -c "mkdir -p /state/source-dir /state/user-output /state/numeric-output /state/root-output \
+    && chmod 0750 /state/source-dir \
     && chown 65532:65532 /state/user-output \
     && chown 42420:42421 /state/numeric-output \
     && : > /state/source-file"
@@ -119,9 +120,78 @@ expect_bind_failure() {
 
 expect_bind_failure /state/source-file /mnt/share incompatible_bind
 expect_bind_failure /state/source-dir /etc/sandcamp-validation/probe.txt incompatible_bind
-expect_bind_failure /state/source-file /missing-target mount_target_resolve_failed
 expect_bind_failure /state/source-file /sandcamp-escape invalid_mount_target
+expect_bind_failure /state/source-file /sandcamp-escape/child invalid_mount_target
+test "$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" stat -c %a /state/source-dir
+)" = "750"
 printf 'sandrun_bind_target_validation=passed\n'
+printf 'sandrun_existing_bind_source_unchanged=passed\n'
+
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$fastapi_volume:/rootfs:ro" \
+  -v "$state_volume:/state" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --overlay-id auto-created-bind-directory \
+  --uid 65532 --gid 65532 \
+  --bind /state/auto-created/source /auto-created/directory/share -- \
+  /bin/sh -c 'printf directory-target > /auto-created/directory/share/result'
+test "$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" cat /state/auto-created/source/result
+)" = "directory-target"
+test "$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" sh -c "stat -c '%a:%u:%g' /state/auto-created /state/auto-created/source"
+)" = $'777:0:0\n777:0:0'
+test "$(
+  docker run --rm --platform linux/amd64 --privileged \
+    --security-opt seccomp=unconfined \
+    -v "$SANDRUN_BIN:/sandrun:ro" \
+    -v "$fastapi_volume:/rootfs:ro" \
+    -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+    "$DEBIAN_IMAGE" \
+    /sandrun --rootfs /rootfs --overlay-id auto-created-bind-directory -- \
+    /bin/sh -c "stat -c '%a:%u:%g' /auto-created /auto-created/directory /auto-created/directory/share"
+)" = $'777:0:0\n777:0:0\n777:0:0'
+printf 'sandrun_missing_bind_source_created=passed\n'
+printf 'sandrun_missing_bind_directory_created=passed\n'
+printf 'sandrun_nonroot_auto_created_bind_writable=passed\n'
+printf 'sandrun_auto_created_directory_permissions=passed\n'
+
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$fastapi_volume:/rootfs:ro" \
+  -v "$state_volume:/state" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --overlay-id auto-created-bind-file \
+  --bind /state/source-file /auto-created/file/config.txt -- \
+  /bin/sh -c 'printf file-target > /auto-created/file/config.txt'
+test "$(
+  docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" \
+    "$ALPINE_IMAGE" cat /state/source-file
+)" = "file-target"
+test "$(
+  docker run --rm --platform linux/amd64 --privileged \
+    --security-opt seccomp=unconfined \
+    -v "$SANDRUN_BIN:/sandrun:ro" \
+    -v "$fastapi_volume:/rootfs:ro" \
+    -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+    "$DEBIAN_IMAGE" \
+    /sandrun --rootfs /rootfs --overlay-id auto-created-bind-file -- \
+    /bin/sh -c "stat -c '%a:%u:%g' /auto-created/file /auto-created/file/config.txt"
+)" = $'777:0:0\n666:0:0'
+docker run --rm --platform linux/amd64 -v "$fastapi_volume:/rootfs:ro" \
+  "$ALPINE_IMAGE" test ! -e /rootfs/auto-created
+printf 'sandrun_missing_bind_file_created=passed\n'
+printf 'sandrun_auto_created_file_permissions=passed\n'
+printf 'sandrun_auto_created_targets_stay_in_overlay=passed\n'
 
 expect_workdir_failure() {
   local workdir=$1

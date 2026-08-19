@@ -11,30 +11,43 @@ import (
 
 func sharedBindMount() Scenario {
 	const (
-		sharedRoot   = "/work/app"
-		observerFile = sharedRoot + "/from-observer.txt"
-		workerFile   = sharedRoot + "/from-worker.txt"
-		mainFile     = sharedRoot + "/from-main.txt"
-		deniedFile   = sharedRoot + "/readonly-write-must-fail.txt"
+		sourceRoot         = "/sandcamp-e2e/auto-created/source"
+		targetRoot         = "/sandcamp-e2e/auto-created/target"
+		observerTargetFile = targetRoot + "/from-observer.txt"
+		workerTargetFile   = targetRoot + "/from-worker.txt"
+		mainSourceFile     = sourceRoot + "/from-main.txt"
+		deniedTargetFile   = targetRoot + "/readonly-write-must-fail.txt"
 	)
-	evidencePaths := strings.Join([]string{observerFile, workerFile, mainFile, deniedFile}, ",")
-	readWriteMount := []sandcamp.BindMount{{Source: sharedRoot, Target: sharedRoot}}
-	readOnlyMount := []sandcamp.BindMount{{Source: sharedRoot, Target: sharedRoot, ReadOnly: true}}
+	sidecarEvidencePaths := strings.Join([]string{
+		observerTargetFile,
+		workerTargetFile,
+		targetRoot + "/from-main.txt",
+		deniedTargetFile,
+	}, ",")
+	mainEvidencePaths := strings.Join([]string{
+		sourceRoot + "/from-observer.txt",
+		sourceRoot + "/from-worker.txt",
+		mainSourceFile,
+		sourceRoot + "/readonly-write-must-fail.txt",
+	}, ",")
+	readWriteMount := []sandcamp.BindMount{{Source: sourceRoot, Target: targetRoot}}
+	readOnlyMount := []sandcamp.BindMount{{Source: sourceRoot, Target: targetRoot, ReadOnly: true}}
 
 	return Scenario{
 		Name:          "shared-bind-mount",
 		Category:      "filesystem",
-		Description:   "Bind one main-image directory into multiple sidecars and verify shared writes plus a read-only view.",
+		Description:   "Create a missing source and targets, then verify non-root shared writes plus a read-only view.",
 		ExpectedState: ExpectedRunning,
 		Build: func(runID, token string) sandcamp.Spec {
 			observer := observerProcess(runID, token)
-			observer.Command = append(observer.Command, "--write", observerFile+"=from-observer")
-			observer.Env[model.FilesEnvironment] = evidencePaths
+			observer.Command = append(observer.Command, "--write", observerTargetFile+"=from-observer")
+			observer.Env[model.FilesEnvironment] = sidecarEvidencePaths
 			observer.Mounts = readWriteMount
 
-			worker := workerProcess("worker-a", 18082, runID, token, "--write", workerFile+"=from-worker")
-			worker.Env[model.FilesEnvironment] = evidencePaths
+			worker := workerProcess("worker-a", 18082, runID, token, "--write", workerTargetFile+"=from-worker")
+			worker.Env[model.FilesEnvironment] = sidecarEvidencePaths
 			worker.Mounts = readWriteMount
+			worker.User = &sandcamp.ProcessUser{UID: 65532, GID: 65532}
 
 			readOnly := process(
 				"worker-b",
@@ -43,7 +56,7 @@ func sharedBindMount() Scenario {
 					"-c",
 					fmt.Sprintf(
 						"if printf 'unexpected' > %s 2>/dev/null; then exit 90; fi; exec %s serve --name worker-b --listen 127.0.0.1:18083",
-						deniedFile,
+						deniedTargetFile,
 						AgentPath,
 					),
 				},
@@ -51,12 +64,14 @@ func sharedBindMount() Scenario {
 				runID,
 				token,
 			)
-			readOnly.Env[model.FilesEnvironment] = evidencePaths
+			readOnly.Env[model.FilesEnvironment] = sidecarEvidencePaths
 			readOnly.Mounts = readOnlyMount
+			readOnly.User = &sandcamp.ProcessUser{UID: 65532, GID: 65532}
 
 			main := mainProcess(runID, token)
-			main.Command = append(main.Command, "--write", mainFile+"=from-main")
-			main.Env[model.FilesEnvironment] = evidencePaths
+			main.Command = append(main.Command, "--write", mainSourceFile+"=from-main")
+			main.Env[model.FilesEnvironment] = mainEvidencePaths
+			main.User = &sandcamp.ProcessUser{UID: 65532, GID: 65532}
 
 			return sandcamp.Spec{
 				Sidecars: []sandcamp.Process{observer, worker, readOnly},
@@ -69,30 +84,44 @@ func sharedBindMount() Scenario {
 				checkProcessNames(processes, "observer", "worker-a", "worker-b", "main"),
 				eventOrderCheck(snapshot.Events, "observer", "worker-a", "worker-b", "main"),
 			}
+			for _, processName := range []string{"worker-a", "worker-b", "main"} {
+				process, found := processes[processName]
+				checks = append(checks, equalCheck(
+					processName+"-nonroot",
+					found && process.UID == 65532 && process.GID == 65532,
+					processName+" runs as the declared non-root identity",
+					map[string]any{"uid": process.UID, "gid": process.GID},
+				))
+			}
 			expected := []struct {
-				path    string
+				file    string
 				content string
 			}{
-				{path: observerFile, content: "from-observer"},
-				{path: workerFile, content: "from-worker"},
-				{path: mainFile, content: "from-main"},
+				{file: "from-observer.txt", content: "from-observer"},
+				{file: "from-worker.txt", content: "from-worker"},
+				{file: "from-main.txt", content: "from-main"},
 			}
 			for _, processName := range []string{"observer", "worker-a", "worker-b", "main"} {
 				process, found := processes[processName]
 				if !found {
 					continue
 				}
+				root := targetRoot
+				if processName == "main" {
+					root = sourceRoot
+				}
 				for _, item := range expected {
-					file := process.Files[item.path]
+					path := root + "/" + item.file
+					file := process.Files[path]
 					checks = append(checks, equalCheck(
-						processName+"-reads-"+strings.TrimSuffix(strings.TrimPrefix(item.path, sharedRoot+"/"), ".txt"),
+						processName+"-reads-"+strings.TrimSuffix(item.file, ".txt"),
 						file.Error == "" && file.Content == item.content,
 						processName+" reads the shared file written by its peer",
 						file,
 					))
 				}
 			}
-			denied := processes["main"].Files[deniedFile]
+			denied := processes["main"].Files[sourceRoot+"/readonly-write-must-fail.txt"]
 			checks = append(checks, equalCheck(
 				"readonly-bind-blocks-write",
 				denied.Error != "",
