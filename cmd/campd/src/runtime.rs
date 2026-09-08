@@ -66,6 +66,7 @@ enum ProcessSource {
         rootfs: String,
         overlay_device: Option<String>,
         standard_mounts: bool,
+        disk_mounts: Vec<String>,
         binds: Vec<Bind>,
         user: Option<ProcessUser>,
     },
@@ -713,6 +714,7 @@ fn from_sidecar(process: SidecarProcess) -> LaunchProcess {
             rootfs: process.rootfs,
             overlay_device: process.overlay_device,
             standard_mounts: process.standard_mounts,
+            disk_mounts: process.disk_mounts,
             binds: process.binds,
             user: process.user,
         },
@@ -758,6 +760,7 @@ fn build_command(process: &LaunchProcess, sandrun: &Path) -> Command {
             rootfs,
             overlay_device,
             standard_mounts,
+            disk_mounts,
             binds,
             user,
         } => {
@@ -769,6 +772,9 @@ fn build_command(process: &LaunchProcess, sandrun: &Path) -> Command {
             command.args(["--overlay-id", &process.name]);
             if *standard_mounts {
                 command.arg("--standard-mounts");
+            }
+            for target in disk_mounts {
+                command.args(["--disk-mount", target]);
             }
             for bind in binds {
                 command.arg(if bind.readonly { "--ro-bind" } else { "--bind" });
@@ -1115,6 +1121,7 @@ mod tests {
                 rootfs: "/mnt/proxy".into(),
                 overlay_device: Some("/dev/vda".into()),
                 standard_mounts: true,
+                disk_mounts: vec!["/var/lib/docker".into()],
                 binds: vec![Bind {
                     source: "/share".into(),
                     target: "/mnt/share".into(),
@@ -1141,6 +1148,8 @@ mod tests {
                 "--overlay-id",
                 "proxy",
                 "--standard-mounts",
+                "--disk-mount",
+                "/var/lib/docker",
                 "--bind",
                 "/share",
                 "/mnt/share",
@@ -1169,6 +1178,7 @@ mod tests {
                 rootfs: "/mnt/worker".into(),
                 overlay_device: None,
                 standard_mounts: false,
+                disk_mounts: Vec::new(),
                 binds: Vec::new(),
                 user: Some(ProcessUser::Numeric(NumericUser {
                     uid: 65_532,

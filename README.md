@@ -227,6 +227,12 @@ NSS/LDAP、解析附加组，也不自动设置 `HOME`、`USER` 或 `LOGNAME`。
 Image Volume 不会自动应用 OCI `Entrypoint`、`Cmd`、`Env`、`WorkingDir`、`User` 或
 健康检查；Sidecar 需要显式声明这些运行信息。
 
+标准挂载会将沙箱现有的 `/sys/fs/cgroup` 递归映射进每个 Sidecar，保留 cgroup
+原有读写权限，但不授予额外 Capability。Docker Data Root 可通过
+`DiskMounts: []string{"/var/lib/docker"}` 直接使用 Sidecar Overlay Device 上的独立
+ext4/XFS 目录，避免在 Sidecar OverlayFS 上再次使用 `overlay2`；若需要外部持久化或
+共享，再通过 `Process.Mounts` 绑定 AGS/Cube 提供的 StorageMount。
+
 ## 当前边界
 
 - 主镜像与所有 Image Volume 必须是兼容的 Linux CPU 架构；
@@ -236,7 +242,8 @@ Image Volume 不会自动应用 OCI `Entrypoint`、`Cmd`、`Env`、`WorkingDir`�
 - 启动预算是所有 Probe `StartupTimeout` 与 Job `Timeout` 之和，最多 25 秒；
 - HTTP Probe 表示共享 Loopback 上的端点状态，不承诺响应者属于某个 Linux PID；
 - campd 的后代回收保证以进程组为边界，主动 `setsid` 的后代不在该保证内；
-- Sandcamp 不提供单进程重启、cgroup 分配或 Registry 元数据解析。
+- Sandcamp 可映射现有 cgroup，但不创建、委托或分配 cgroup，也不提供单进程重启或
+  Registry 元数据解析。
 
 ## 开发与验证
 
@@ -247,6 +254,7 @@ task lint
 task build
 task test:campd-linux
 task test:sandrun-linux
+task test:dind-linux
 task test:stack-linux
 task e2e:list
 task e2e:build

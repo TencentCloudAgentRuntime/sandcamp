@@ -60,6 +60,7 @@ Linux 上额外执行 5 个 campd 进程集成测试：
 ```bash
 task test:campd-linux
 task test:sandrun-linux
+task test:dind-linux
 task test:stack-linux
 ```
 
@@ -75,7 +76,11 @@ task test:stack-linux
   `NoNewPrivs=1`；
 - 无 passwd 数字身份与显式 root 保留 Capability；
 - 用户缺失严格失败；
-- lower 不变、exec 信号链路、FastAPI 与 Egress 完整 RootFS。
+- lower 不变、exec 信号链路、FastAPI 与 Egress 完整 RootFS；
+- host cgroup 的递归映射和 Docker Data Root 的显式 Bind。
+
+`test-dind-linux.sh` 使用独立 Data Root 启动嵌套 dockerd，确认 `overlay2` 的 backing
+store 不是 Sidecar OverlayFS，并实际执行一个 `docker run --network=none`。
 
 `test-stack-linux.sh` 分别以 root 和 `65532:65532` 主镜像入口执行：
 

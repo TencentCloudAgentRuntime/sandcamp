@@ -19,7 +19,8 @@ Options:
   --user NAME            User from the Sidecar rootfs /etc/passwd
   --uid UID              Explicit numeric user ID (requires --gid)
   --gid GID              Explicit numeric primary group ID (requires --uid)
-  --standard-mounts      Add proc, dev, read-only sys/DNS, tmpfs /tmp and /run
+  --standard-mounts      Add proc, dev, cgroup, read-only sys/DNS, tmpfs /tmp and /run
+  --disk-mount TARGET    Bind a private overlay-device directory at TARGET
   --bind SOURCE TARGET   Bind a host path read-write; create missing paths
   --ro-bind SOURCE TARGET
                          Bind a host path read-only; create missing paths
@@ -64,6 +65,7 @@ pub struct Config {
     pub workdir: PathBuf,
     pub user: Option<ProcessUser>,
     pub standard_mounts: bool,
+    pub disk_mounts: Vec<PathBuf>,
     pub binds: Vec<Bind>,
     pub tmpfs: Vec<PathBuf>,
     pub command: Vec<OsString>,
@@ -85,6 +87,7 @@ pub enum ConfigError {
     DuplicateUserOption(&'static str),
     ConflictingUserOptions,
     IncompleteNumericUser,
+    DiskMountRequiresOverlayDevice,
     InvalidPath {
         field: &'static str,
         path: PathBuf,
@@ -130,6 +133,9 @@ impl fmt::Display for ConfigError {
             }
             Self::IncompleteNumericUser => {
                 formatter.write_str("--uid and --gid must be specified together")
+            }
+            Self::DiskMountRequiresOverlayDevice => {
+                formatter.write_str("--disk-mount requires --overlay-device")
             }
             Self::InvalidPath { field, path } => {
                 write!(
@@ -258,6 +264,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
     let mut uid = None;
     let mut gid = None;
     let mut standard_mounts = false;
+    let mut disk_mounts = Vec::new();
     let mut binds = Vec::new();
     let mut tmpfs = Vec::new();
     let mut separator = None;
@@ -332,6 +339,9 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
             Some("--standard-mounts") => {
                 standard_mounts = true;
             }
+            Some("--disk-mount") => {
+                disk_mounts.push(path_value(&arguments, &mut index, "--disk-mount")?);
+            }
             Some("--bind") | Some("--ro-bind") => {
                 let option = if argument == "--bind" {
                     "--bind"
@@ -373,8 +383,14 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
     if overlay_device.is_some() && overlay_id.is_none() {
         return Err(ConfigError::MissingOption("--overlay-id"));
     }
+    if !disk_mounts.is_empty() && overlay_device.is_none() {
+        return Err(ConfigError::DiskMountRequiresOverlayDevice);
+    }
     validate_inner_path("workdir", &workdir, true)?;
     validate_inner_path("command", Path::new(&command[0]), false)?;
+    for target in &disk_mounts {
+        validate_inner_path("disk mount target", target, false)?;
+    }
     for bind in &binds {
         validate_outer_path("bind source", &bind.source)?;
         validate_inner_path("bind target", &bind.target, false)?;
@@ -382,7 +398,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
     for target in &tmpfs {
         validate_inner_path("tmpfs target", target, false)?;
     }
-    validate_mount_targets(standard_mounts, &binds, &tmpfs)?;
+    validate_mount_targets(standard_mounts, &disk_mounts, &binds, &tmpfs)?;
 
     let user = match (user_name, uid, gid) {
         (Some(name), None, None) => Some(ProcessUser::Named(name)),
@@ -399,6 +415,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Confi
         workdir,
         user,
         standard_mounts,
+        disk_mounts,
         binds,
         tmpfs,
         command,
@@ -482,15 +499,20 @@ fn clean_absolute(path: &Path, allow_root: bool) -> bool {
 
 fn validate_mount_targets(
     standard_mounts: bool,
+    disk_mounts: &[PathBuf],
     binds: &[Bind],
     tmpfs: &[PathBuf],
 ) -> Result<(), ConfigError> {
     let mut targets = Vec::with_capacity(
-        binds.len() + tmpfs.len() + usize::from(standard_mounts) * STANDARD_TARGETS.len(),
+        disk_mounts.len()
+            + binds.len()
+            + tmpfs.len()
+            + usize::from(standard_mounts) * STANDARD_TARGETS.len(),
     );
     if standard_mounts {
         targets.extend(STANDARD_TARGETS.into_iter().map(PathBuf::from));
     }
+    targets.extend(disk_mounts.iter().cloned());
     targets.extend(binds.iter().map(|bind| bind.target.clone()));
     targets.extend(tmpfs.iter().cloned());
     validate_target_paths(&targets)
@@ -556,6 +578,7 @@ mod tests {
                 workdir: PathBuf::from("/"),
                 user: None,
                 standard_mounts: false,
+                disk_mounts: Vec::new(),
                 binds: Vec::new(),
                 tmpfs: Vec::new(),
                 command: arguments(&["/bin/app", "one"]),
@@ -577,6 +600,8 @@ mod tests {
             "--user",
             "app",
             "--standard-mounts",
+            "--disk-mount",
+            "/var/lib/docker",
             "--bind",
             "/state/app",
             "/var/lib/app",
@@ -593,6 +618,7 @@ mod tests {
         assert_eq!(config.overlay_device, Some(PathBuf::from("/dev/vda")));
         assert_eq!(config.overlay_id, Some(OsString::from("fastapi")));
         assert!(config.standard_mounts);
+        assert_eq!(config.disk_mounts, vec![PathBuf::from("/var/lib/docker")]);
         assert_eq!(config.workdir, Path::new("/work"));
         assert_eq!(
             config.user.as_ref(),
@@ -696,6 +722,17 @@ mod tests {
                 "/bin/app",
             ])),
             Err(ConfigError::MissingOption("--overlay-id"))
+        );
+        assert_eq!(
+            parse_args(arguments(&[
+                "--rootfs",
+                "/images/app",
+                "--disk-mount",
+                "/var/lib/docker",
+                "--",
+                "/bin/app",
+            ])),
+            Err(ConfigError::DiskMountRequiresOverlayDevice)
         );
     }
 

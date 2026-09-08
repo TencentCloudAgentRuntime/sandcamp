@@ -54,6 +54,14 @@ tasks:
     cmds:
       - bash ./scripts/test-sandrun-linux.sh
 
+  test:dind-linux:
+    desc: 验证 host cgroup 与独立 Data Root 支持嵌套 dockerd
+    deps: [build]
+    env:
+      SANDRUN_BIN: '{{.ROOT_DIR}}/out/sandrun'
+    cmds:
+      - bash ./scripts/test-dind-linux.sh
+
   test:campd-linux:
     desc: 在 Docker 中执行 campd 进程、Job 和持续 Readiness 集成测试
     cmds:

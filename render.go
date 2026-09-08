@@ -101,6 +101,7 @@ type runtimeSidecar struct {
 	RootFS         string        `json:"rootfs"`
 	OverlayDevice  string        `json:"overlay_device,omitempty"`
 	StandardMounts bool          `json:"standard_mounts"`
+	DiskMounts     []string      `json:"disk_mounts,omitempty"`
 	Binds          []runtimeBind `json:"binds,omitempty"`
 	User           *runtimeUser  `json:"user,omitempty"`
 }
@@ -160,6 +161,7 @@ func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
 		RootFS:         image.mountPath,
 		OverlayDevice:  defaultOverlayDevicePath,
 		StandardMounts: true,
+		DiskMounts:     process.DiskMounts,
 		Binds:          toRuntimeBinds(process.Mounts),
 	}
 	if process.User != nil {

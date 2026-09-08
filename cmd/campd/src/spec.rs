@@ -49,6 +49,8 @@ pub struct SidecarProcess {
     #[serde(default)]
     pub standard_mounts: bool,
     #[serde(default)]
+    pub disk_mounts: Vec<String>,
+    #[serde(default)]
     pub binds: Vec<Bind>,
     pub command: Vec<String>,
     #[serde(default)]
@@ -210,6 +212,33 @@ pub fn validate(spec: &Spec) -> Result<(), SpecError> {
         );
         if process.standard_mounts {
             bind_targets.extend(STANDARD_MOUNT_TARGETS.iter().map(Path::new));
+        }
+        for target in &process.disk_mounts {
+            if !valid_path(target, false) {
+                return Err(SpecError::new(format!(
+                    "sidecar {} disk mount target must be a clean absolute path",
+                    process.name
+                )));
+            }
+            let target = Path::new(target);
+            for previous in &bind_targets {
+                if target == *previous {
+                    return Err(SpecError::new(format!(
+                        "sidecar {} disk mount target {} is duplicated",
+                        process.name,
+                        target.display()
+                    )));
+                }
+                if target.starts_with(previous) || previous.starts_with(target) {
+                    return Err(SpecError::new(format!(
+                        "sidecar {} disk mount target {} overlaps {}",
+                        process.name,
+                        target.display(),
+                        previous.display()
+                    )));
+                }
+            }
+            bind_targets.push(target);
         }
         for bind in &process.binds {
             if !valid_path(&bind.source, false) || !valid_path(&bind.target, false) {
@@ -505,6 +534,7 @@ mod tests {
                 rootfs: "/mnt/proxy".into(),
                 overlay_device: Some("/dev/vda".into()),
                 standard_mounts: true,
+                disk_mounts: Vec::new(),
                 binds: Vec::new(),
                 command: vec!["/bin/proxy".into()],
                 env: BTreeMap::new(),
@@ -559,6 +589,16 @@ mod tests {
         }));
         spec.main[1].user = Some(ProcessUser::Named(NamedUser { name: "app".into() }));
         assert_eq!(validate(&spec), Ok(()));
+    }
+
+    #[test]
+    fn accepts_private_disk_mounts() {
+        let mut spec = valid_spec();
+        spec.sidecars[0].disk_mounts = vec!["/var/lib/docker".into()];
+        assert_eq!(validate(&spec), Ok(()));
+
+        spec.sidecars[0].disk_mounts = vec!["/run/docker".into()];
+        assert!(validate(&spec).is_err());
     }
 
     #[test]

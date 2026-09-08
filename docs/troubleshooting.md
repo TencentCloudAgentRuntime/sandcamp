@@ -97,6 +97,22 @@ Nested Overlay。不要使用主容器普通目录作为 upper；应使用 `/dev
 同一个 `overlay-id + rootfs` 已被另一个进程使用。每个并发 Sidecar 必须使用不同
 `overlay-id`。进程重启可以复用原 ID。
 
+### `Devices cgroup isn't mounted`
+
+嵌套 dockerd 看不到 cgroup v1 controller 子挂载或 cgroup v2 unified mount。新版
+sandrun 的标准挂载会自动递归映射 cgroup；分别从 Main 和 Sidecar 检查：
+
+```bash
+findmnt -R /sys/fs/cgroup
+```
+
+标准挂载只映射调用方已有的 cgroup 视图。如果 Source 本身只读、平台没有委托可写
+子树，或缺少所需 Capability，dockerd 仍可能启动失败或无法创建容器。
+
+Docker 使用 `overlay2` 时应配置 `DiskMounts: []string{"/var/lib/docker"}`，或将该
+路径 Bind 到真实 XFS/ext4 StorageMount。若 `stat -f -c '%T' /var/lib/docker` 返回
+`overlayfs`，仍存在 Nested Overlay。
+
 ## 5. RootFS 或命令失败
 
 ### `executable ... does not exist`

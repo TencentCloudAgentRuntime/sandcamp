@@ -83,7 +83,13 @@ OverlayFS 允许 sandrun 在不修改只读 Image Volume 的前提下创建目�
 整棵 `/etc`。
 
 显式声明的 `--bind` 和 `--ro-bind` 均为非递归挂载。标准 `/dev` 挂载是递归的，
-以便保留 `devpts` 等设备子挂载。
+以便保留 `devpts` 等设备子挂载。`--standard-mounts` 还会把调用方的
+`/sys/fs/cgroup` 递归 Bind 到 Sidecar，保留 cgroup v1 controller 子挂载或 cgroup v2
+unified mount 及其原始读写权限。它不授予 Capability，也不把只读 cgroup 变为可写。
+
+`--disk-mount TARGET` 要求 `--overlay-device` 和稳定的 `--overlay-id`。sandrun 在
+Overlay Device 上按 `overlay-id + RootFS + Target` 创建稳定私有目录，再直接 Bind 到
+Target；该路径不经过 Sidecar OverlayFS，适合作为 Docker `overlay2` Data Root。
 
 Source 缺失时，sandrun 会在主 Mount Namespace 中将它及缺失父级创建为 `0777`
 目录；缺失 Source 若应为普通文件则必须提前创建。Target 缺失时，会在 OverlayFS
