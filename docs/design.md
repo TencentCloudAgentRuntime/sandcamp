@@ -193,12 +193,17 @@ Overlay Identity 使用 `overlay-id + canonical rootfs` 的 SHA-256，写层位�
 状态。文件锁禁止同一 Identity 并发挂载。
 
 标准挂载包括 `/proc`、沙箱 `/dev`、只读 `/sys`、可写 tmpfs `/tmp` 与 `/run`，以及
-只读注入的 hosts/resolv.conf。应用共享目录通过 `Process.Mounts` 显式 Bind。普通文件
-修改会在共享方之间立即可见；Bind 是非递归的，不传播 Source 下后来新增的子挂载。
+只读注入的 hosts/resolv.conf。标准挂载同时把调用方 `/sys/fs/cgroup` 递归 Bind
+到 `/sys` 之下，保留 cgroup v1/v2 子挂载和原始权限。应用共享目录通过
+`Process.Mounts` 显式 Bind。普通文件修改会在共享方之间立即可见；普通 Bind 是
+非递归的，不传播 Source 下后来新增的子挂载。
 
 Bind Source 可以来自主镜像 RootFS 或 Tool StorageMount。Sidecar 自己的 Overlay upper
 只存在于它的私有 Mount Namespace，不能直接共享给其他 Sidecar；需要共享可写数据时，
-应把同一个 Main/Tool 路径 Bind 给所有参与进程。
+应把同一个 Main/Tool 路径 Bind 给所有参与进程。`Process.DiskMounts` 则从 Sidecar
+Overlay Device 为每个 Target 分配稳定的私有 ext4/XFS 目录；嵌套容器运行时可将其
+用于 Data Root，避免以 Sidecar OverlayFS 作为 `overlay2` backing store。需要跨进程
+共享或独立持久化时，仍应使用外部 StorageMount。
 
 ## 环境与用户
 

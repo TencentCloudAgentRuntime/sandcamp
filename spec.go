@@ -75,6 +75,10 @@ type Process struct {
 	// Mounts bind paths from the sandbox's main Mount Namespace into a
 	// Sidecar root filesystem. Main processes cannot configure Mounts.
 	Mounts []BindMount
+	// DiskMounts bind private directories from the Sidecar overlay device
+	// directly onto these targets. They bypass the Sidecar OverlayFS and last
+	// for the sandbox lifetime. Main processes cannot configure DiskMounts.
+	DiskMounts []string
 
 	Probe   *ReadinessProbe // Service only.
 	Timeout time.Duration   // RunToCompletion only.
@@ -158,6 +162,9 @@ func (spec Spec) Validate() error {
 		if len(process.Mounts) != 0 {
 			return fmt.Errorf("%w: main process %s cannot configure bind mounts", ErrInvalidSpec, process.Name)
 		}
+		if len(process.DiskMounts) != 0 {
+			return fmt.Errorf("%w: main process %s cannot configure disk mounts", ErrInvalidSpec, process.Name)
+		}
 	}
 	if serviceCount == 0 {
 		return fmt.Errorf("%w: declaration must contain at least one service", ErrInvalidSpec)
@@ -182,8 +189,30 @@ var standardSidecarMountTargets = [...]string{
 }
 
 func validateSidecarMounts(process Process) error {
-	targets := make([]string, 0, len(standardSidecarMountTargets)+len(process.Mounts))
+	targets := make([]string, 0, len(standardSidecarMountTargets)+len(process.Mounts)+len(process.DiskMounts))
 	targets = append(targets, standardSidecarMountTargets[:]...)
+	for index, target := range process.DiskMounts {
+		if !validAbsolutePath(target) {
+			return fmt.Errorf(
+				"%w: sidecar process %s disk_mounts[%d] must be a clean absolute path",
+				ErrInvalidSpec,
+				process.Name,
+				index,
+			)
+		}
+		for _, previous := range targets {
+			if mountTargetsOverlap(previous, target) {
+				return fmt.Errorf(
+					"%w: sidecar process %s disk mount target %s overlaps %s",
+					ErrInvalidSpec,
+					process.Name,
+					target,
+					previous,
+				)
+			}
+		}
+		targets = append(targets, target)
+	}
 	for index, mount := range process.Mounts {
 		if !validAbsolutePath(mount.Source) {
 			return fmt.Errorf(

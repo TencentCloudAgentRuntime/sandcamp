@@ -39,6 +39,7 @@ type runtimeSidecar struct {
 	RootFS         string        `json:"rootfs"`
 	OverlayDevice  string        `json:"overlay_device,omitempty"`
 	StandardMounts bool          `json:"standard_mounts"`
+	DiskMounts     []string      `json:"disk_mounts,omitempty"`
 	Binds          []runtimeBind `json:"binds,omitempty"`
 	User           *runtimeUser  `json:"user,omitempty"`
 }
@@ -143,6 +144,7 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 			RootFS:         configured.RootFS,
 			OverlayDevice:  configured.OverlayDevice,
 			StandardMounts: configured.StandardMounts,
+			DiskMounts:     process.DiskMounts,
 			Binds:          toRuntimeBinds(process.Mounts),
 		}
 		if process.User != nil {

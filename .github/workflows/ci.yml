@@ -144,6 +144,11 @@ jobs:
           SANDRUN_BIN: ${{ github.workspace }}/out/sandrun
         run: bash ./scripts/test-sandrun-linux.sh
 
+      - name: Test nested Docker runtime
+        env:
+          SANDRUN_BIN: ${{ github.workspace }}/out/sandrun
+        run: bash ./scripts/test-dind-linux.sh
+
       - name: Test the root stack
         env:
           SCENARIO: root

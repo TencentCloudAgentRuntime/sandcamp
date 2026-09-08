@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const OVERLAY_BASE: &str = "/var/lib/sandcamp/overlay";
 const OVERLAY_DEVICE_MOUNT: &str = "/var/lib/sandcamp/overlay-device";
 const OVERLAY_DEVICE_NAMESPACE: &str = "sandcamp/overlay/v1";
+const DISK_MOUNT_NAMESPACE: &str = "disk-mounts";
 const MAX_PASSWD_BYTES: u64 = 1024 * 1024;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 const CREATED_DIRECTORY_MODE: u32 = 0o777;
@@ -93,10 +94,28 @@ pub(crate) fn run(config: Config) -> Result<(), RuntimeError> {
     let rootfs = &overlay.merged;
 
     prepare_bind_targets(rootfs, &config.binds)?;
+    if config.standard_mounts {
+        ensure_bind_target(rootfs, &host_cgroup_bind())?;
+    }
+    let disk_binds = if config.disk_mounts.is_empty() {
+        Vec::new()
+    } else {
+        prepare_disk_binds(
+            rootfs,
+            &lower,
+            &overlay_base,
+            config
+                .overlay_id
+                .as_deref()
+                .expect("disk mounts require a stable overlay identity"),
+            &config.disk_mounts,
+        )?
+    };
     prepare_workdir(rootfs, &config.workdir)?;
     prepare_executable(rootfs, Path::new(&config.command[0]))?;
     validate_resolved_mount_targets(rootfs, &config)?;
-    let operations = prepare_mounts(rootfs, &config)?;
+    let mut operations = prepare_mounts(rootfs, &config)?;
+    operations.extend(disk_binds.into_iter().map(MountOperation::Bind));
     for operation in operations {
         apply_mount(operation)?;
     }
@@ -615,6 +634,10 @@ fn prepare_mounts(rootfs: &Path, config: &Config) -> Result<Vec<MountOperation>,
                 readonly: true,
             },
         )?));
+        operations.push(MountOperation::Bind(prepare_recursive_bind(
+            rootfs,
+            &host_cgroup_bind(),
+        )?));
         operations.push(MountOperation::Tmpfs {
             target: resolve_directory(rootfs, "/tmp")?,
             mode: 0o1777,
@@ -659,6 +682,9 @@ fn validate_resolved_mount_targets(rootfs: &Path, config: &Config) -> Result<(),
             &etc.join("hosts"),
             Path::new("/etc/hosts"),
         )?);
+    }
+    for target in &config.disk_mounts {
+        targets.push(resolve_inner_target(rootfs, target)?);
     }
     for bind in &config.binds {
         targets.push(resolve_inner_target(rootfs, &bind.target)?);
@@ -799,6 +825,45 @@ fn ensure_bind_source_directory(source: &Path) -> Result<(), RuntimeError> {
     fs::canonicalize(source).map(|_| ()).map_err(|error| {
         RuntimeError::operation("bind_source_resolve_failed", source.to_path_buf(), error)
     })
+}
+
+fn prepare_disk_binds(
+    rootfs: &Path,
+    lower: &Path,
+    overlay_base: &Path,
+    overlay_id: &OsStr,
+    targets: &[PathBuf],
+) -> Result<Vec<PreparedBind>, RuntimeError> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = overlay_base.join(DISK_MOUNT_NAMESPACE);
+    ensure_private_directory(&base, "disk_mount_base_create_failed")?;
+    let mut result = Vec::with_capacity(targets.len());
+    for target in targets {
+        let mut identity = b"sandrun-disk-mount-v1".to_vec();
+        append_identity_part(&mut identity, overlay_id.as_bytes());
+        append_identity_part(&mut identity, lower.as_os_str().as_bytes());
+        append_identity_part(&mut identity, target.as_os_str().as_bytes());
+        let source = base.join(hex_lower(&Sha256::digest(identity)));
+        ensure_private_directory(&source, "disk_mount_source_create_failed")?;
+        let bind = Bind {
+            source,
+            target: target.clone(),
+            readonly: false,
+        };
+        ensure_bind_target(rootfs, &bind)?;
+        result.push(prepare_bind(rootfs, &bind)?);
+    }
+    Ok(result)
+}
+
+fn host_cgroup_bind() -> Bind {
+    Bind {
+        source: PathBuf::from("/sys/fs/cgroup"),
+        target: PathBuf::from("/sys/fs/cgroup"),
+        readonly: false,
+    }
 }
 
 fn prepare_bind_targets(rootfs: &Path, binds: &[Bind]) -> Result<(), RuntimeError> {
@@ -1383,6 +1448,47 @@ mod tests {
     }
 
     #[test]
+    fn disk_mounts_use_stable_direct_device_directories() {
+        let workspace = temporary_root("disk-mount");
+        let root = workspace.join("root");
+        let lower = workspace.join("lower");
+        let overlay_base = workspace.join("device/sandcamp/overlay/v1");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&overlay_base).unwrap();
+        let targets = vec![PathBuf::from("/var/lib/docker")];
+
+        let first = prepare_disk_binds(
+            &root,
+            &lower,
+            &overlay_base,
+            OsStr::new("rdockerd"),
+            &targets,
+        )
+        .unwrap();
+        let repeated = prepare_disk_binds(
+            &root,
+            &lower,
+            &overlay_base,
+            OsStr::new("rdockerd"),
+            &targets,
+        )
+        .unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].source, repeated[0].source);
+        assert!(
+            first[0]
+                .source
+                .starts_with(overlay_base.join(DISK_MOUNT_NAMESPACE))
+        );
+        assert_eq!(first[0].target, root.join("var/lib/docker"));
+        assert!(first[0].source.is_dir());
+        assert!(first[0].target.is_dir());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn resolves_absolute_symlinks_inside_rootfs() {
         let root = temporary_root("absolute-link");
         fs::create_dir_all(root.join("usr")).unwrap();
@@ -1432,6 +1538,7 @@ mod tests {
             workdir: PathBuf::from("/"),
             user: None,
             standard_mounts: false,
+            disk_mounts: Vec::new(),
             binds: Vec::new(),
             tmpfs: vec![PathBuf::from("/root-alias")],
             command: vec![OsString::from("/bin/app")],

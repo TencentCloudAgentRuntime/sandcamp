@@ -95,6 +95,37 @@ docker run --rm --platform linux/amd64 -v "$state_volume:/state" "$ALPINE_IMAGE"
     && chown 42420:42421 /state/numeric-output \
     && : > /state/source-file"
 
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$alpine_volume:/rootfs:ro" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --standard-mounts -- \
+  /bin/sh -ec '
+    awk '\''$5 ~ /^\/sys\/fs\/cgroup(\/|$)/ && $0 ~ / - cgroup2? / { found=1 }
+         END { exit !found }'\'' /proc/self/mountinfo
+  '
+printf 'sandrun_standard_cgroup=passed\n'
+
+docker run --rm --platform linux/amd64 --privileged \
+  --security-opt seccomp=unconfined \
+  -v "$SANDRUN_BIN:/sandrun:ro" \
+  -v "$alpine_volume:/rootfs:ro" \
+  -v "$state_volume:/docker-data" \
+  -v "$overlay_volume:/var/lib/sandcamp/overlay" \
+  "$DEBIAN_IMAGE" \
+  /sandrun --rootfs /rootfs --standard-mounts \
+    --bind /docker-data /var/lib/docker -- \
+  /bin/sh -ec '
+    awk '\''$5 == "/var/lib/docker" { found=1 }
+         END { exit !found }'\'' /proc/self/mountinfo
+    touch /var/lib/docker/sandcamp-docker-data
+  '
+docker run --rm --platform linux/amd64 -v "$state_volume:/state:ro" "$ALPINE_IMAGE" \
+  test -f /state/sandcamp-docker-data
+printf 'sandrun_docker_data_bind=passed\n'
+
 expect_bind_failure() {
   local source=$1
   local target=$2

@@ -122,8 +122,9 @@ type Process struct {
     Env     map[string]string
     WorkDir string
     User    *ProcessUser
-    Expose  []int
-    Mounts  []BindMount
+    Expose      []int
+    Mounts      []BindMount
+    DiskMounts  []string
 
     Probe   *ReadinessProbe
     Timeout time.Duration
@@ -234,6 +235,42 @@ Mounts: []sandcamp.BindMount{{
 
 因为 Sidecar 在 Main 进程之前启动，缺失的目录 Source 由第一个使用它的 Sidecar
 预先创建，后续 Sidecar 和 Main 都能看到同一目录。位于只读挂载中的 Source 无法创建。
+
+Docker 等嵌套运行时不应把数据目录直接放在 Sidecar OverlayFS 中。调用方应先通过
+AGS/Cube 把 XFS 或 ext4 存储挂入主 Mount Namespace，再显式 Bind 到 Sidecar：
+
+```go
+Mounts: []sandcamp.BindMount{{
+    Source: "/mnt/docker-data/rdockerd",
+    Target: "/var/lib/docker",
+}}
+```
+
+`Source` 必须是真实存储挂载中的目录；仅在主容器 Overlay RootFS 中创建目录再 Bind，
+不会改变其文件系统类型。每个 dockerd 必须使用独立 Data Root。
+
+### `DiskMounts`
+
+`DiskMounts` 仅适用于 Sidecar。每个 Target 对应沙箱系统盘中的一个稳定私有目录，
+sandrun 在自己的 Mount Namespace 中挂载 Overlay Device 后创建该目录，再直接 Bind
+到 Sidecar Target：
+
+```go
+DiskMounts: []string{"/var/lib/docker"}
+```
+
+- Target 缺失时自动在 Sidecar OverlayFS 中创建；
+- 目录按 `Sidecar Name + RootFS + Target` 派生，进程重启复用；
+- 数据与沙箱系统盘同生命周期，不与 Main 或其他 Sidecar 共享；
+- Target 不能重复、互相包含或与标准挂载、`Mounts` 重叠；
+- 目录直接位于 Overlay Device 的 ext4/XFS 文件系统，适合作为 Docker `overlay2`
+  Data Root，避免 Nested Overlay；
+- 每个 Sidecar 仍使用同一系统盘配额，Sandcamp 不单独限制 DiskMount 容量。
+
+Sidecar 标准挂载会自动把调用方可见的 `/sys/fs/cgroup` 递归 Bind 进 RootFS，保留
+cgroup v1 controller 子挂载或 cgroup v2 unified mount 及其原始权限。该行为不会授予
+Capability，也不会把只读 cgroup 变为可写。能否创建子 cgroup 仍取决于 AGS/Cube
+提供的 cgroup 委托、Capabilities 和 Seccomp 策略。
 
 ### `User`
 

@@ -219,6 +219,19 @@ func TestRenderStartOmitsPortsWhenNothingIsExposed(t *testing.T) {
 	}
 }
 
+func TestRenderStartEncodesDiskMountsForSidecar(t *testing.T) {
+	spec := referenceSpec()
+	spec.Sidecars[0].DiskMounts = []string{"/var/lib/docker", "/var/lib/containerd"}
+	configuration, err := RenderStart(referenceImages(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _ := decodeRuntimeSpec(t, configuration)
+	if want := []string{"/var/lib/docker", "/var/lib/containerd"}; !reflect.DeepEqual(decoded.Sidecars[0].DiskMounts, want) {
+		t.Fatalf("disk mounts = %v, want %v", decoded.Sidecars[0].DiskMounts, want)
+	}
+}
+
 func TestRenderStartRejectsMissingSidecarImage(t *testing.T) {
 	images := referenceImages()
 	images.Sidecars = images.Sidecars[:1]
@@ -336,6 +349,27 @@ func TestRenderStartValidation(t *testing.T) {
 			name: "main bind mount",
 			edit: func(spec *Spec) {
 				spec.Main[1].Mounts = []BindMount{{Source: "/mnt/share", Target: "/mnt/share"}}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "main disk mount",
+			edit: func(spec *Spec) {
+				spec.Main[1].DiskMounts = []string{"/var/lib/docker"}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "disk mount overlaps standard mount",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].DiskMounts = []string{"/run/docker"}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "disk mount overlaps bind mount",
+			edit: func(spec *Spec) {
+				spec.Sidecars[1].DiskMounts = []string{"/mnt/share/cache"}
 			},
 			want: ErrInvalidSpec,
 		},
