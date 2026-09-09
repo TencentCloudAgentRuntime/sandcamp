@@ -121,10 +121,11 @@ type Process struct {
     Command []string
     Env     map[string]string
     WorkDir string
-    User    *ProcessUser
-    Expose      []int
-    Mounts      []BindMount
-    DiskMounts  []string
+    User          *ProcessUser
+    Expose        []int
+    OverlayDevice string
+    Mounts        []BindMount
+    DiskMounts    []string
 
     Probe   *ReadinessProbe
     Timeout time.Duration
@@ -200,6 +201,19 @@ Command: []string{"/bin/sh", "-c", "exec /app/server --port 8080"}
 - `/` 可作为 WorkDir；
 - Sidecar WorkDir 在 `pivot_root` 后应用。
 
+### `OverlayDevice`
+
+`OverlayDevice` 仅适用于 Sidecar，用于 Sidecar 可写 Overlay upper/work 和
+`DiskMounts`。默认值为 `/dev/vdb`；当 Cube 没有注入平台 Sidecar、业务容器系统盘
+位于其他设备时，可以显式覆盖：
+
+```go
+OverlayDevice: "/dev/vda"
+```
+
+设备必须是规范化绝对路径，并且已由 AGS/Cube 提供为可挂载的块设备。Cube 中设备号
+由容器系统盘顺序决定，因此调用方应以业务 sandbox 系统盘为准，而不是根据容量猜测。
+
 ### `Mounts`
 
 ```go
@@ -236,8 +250,9 @@ Mounts: []sandcamp.BindMount{{
 因为 Sidecar 在 Main 进程之前启动，缺失的目录 Source 由第一个使用它的 Sidecar
 预先创建，后续 Sidecar 和 Main 都能看到同一目录。位于只读挂载中的 Source 无法创建。
 
-Docker 等嵌套运行时不应把数据目录直接放在 Sidecar OverlayFS 中。调用方应先通过
-AGS/Cube 把 XFS 或 ext4 存储挂入主 Mount Namespace，再显式 Bind 到 Sidecar：
+Docker 等嵌套运行时不应把数据目录直接放在 Sidecar OverlayFS 中。需要使用外部
+共享或持久化存储时，调用方应先通过 AGS/Cube 把 XFS 或 ext4 存储挂入主 Mount
+Namespace，再显式 Bind 到 Sidecar：
 
 ```go
 Mounts: []sandcamp.BindMount{{
@@ -401,7 +416,7 @@ RootFS，把 `Mounts` 转换为 Sidecar `binds`；`Expose` 已转换为 AGS Port
 - Runtime 镜像包含 `/bin/campd`、`/bin/campd.real` 和 `/bin/sandrun`；
 - Runtime setuid launcher 以 PID 1 启动，并获得 EUID 0；
 - campd/sandrun 具备 root 与 `CAP_SYS_ADMIN`；
-- `/dev/vda` 是可用于 OverlayFS upper/work 的 ext4 设备；
+- 业务 sandbox 系统盘作为可用于 OverlayFS upper/work 的 ext4/XFS Block Device 暴露；
 - 主镜像与 Image Volume 架构一致；
 - Main 与 Sidecar 共享 Network Namespace；
 - Mount Namespace、OverlayFS 与 `pivot_root` 不是安全隔离边界。

@@ -139,6 +139,9 @@ func encode(spec sandcamp.Spec, sidecars map[string]SidecarRuntime) (string, err
 	}
 	for _, process := range spec.Sidecars {
 		configured := sidecars[process.Name]
+		if process.OverlayDevice != "" {
+			configured.OverlayDevice = process.OverlayDevice
+		}
 		rendered := runtimeSidecar{
 			runtimeProcess: toRuntimeProcess(process),
 			RootFS:         configured.RootFS,

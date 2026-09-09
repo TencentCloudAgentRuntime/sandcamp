@@ -72,6 +72,9 @@ type Process struct {
 	WorkDir string
 	User    *ProcessUser
 	Expose  []int
+	// OverlayDevice is the block device used for the Sidecar writable overlay
+	// and DiskMounts. It defaults to /dev/vdb. Main processes cannot configure it.
+	OverlayDevice string
 	// Mounts bind paths from the sandbox's main Mount Namespace into a
 	// Sidecar root filesystem. Main processes cannot configure Mounts.
 	Mounts []BindMount
@@ -159,6 +162,9 @@ func (spec Spec) Validate() error {
 		if err := validateProcess(process, names, ports, &startupBudget, &serviceCount); err != nil {
 			return err
 		}
+		if process.OverlayDevice != "" {
+			return fmt.Errorf("%w: main process %s cannot configure an overlay device", ErrInvalidSpec, process.Name)
+		}
 		if len(process.Mounts) != 0 {
 			return fmt.Errorf("%w: main process %s cannot configure bind mounts", ErrInvalidSpec, process.Name)
 		}
@@ -189,6 +195,13 @@ var standardSidecarMountTargets = [...]string{
 }
 
 func validateSidecarMounts(process Process) error {
+	if process.OverlayDevice != "" && !validAbsolutePath(process.OverlayDevice) {
+		return fmt.Errorf(
+			"%w: sidecar process %s overlay device must be a clean absolute path",
+			ErrInvalidSpec,
+			process.Name,
+		)
+	}
 	targets := make([]string, 0, len(standardSidecarMountTargets)+len(process.Mounts)+len(process.DiskMounts))
 	targets = append(targets, standardSidecarMountTargets[:]...)
 	for index, target := range process.DiskMounts {

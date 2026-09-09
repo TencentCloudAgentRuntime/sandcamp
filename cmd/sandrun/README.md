@@ -40,7 +40,7 @@ Mount Namespace 和 `pivot_root` 用于保证依赖正确：可执行文件、Dy
 ```sh
 sandrun \
   --rootfs /mnt/image-volumes/fastapi \
-  --overlay-device /dev/vda \
+  --overlay-device /dev/vdb \
   --overlay-id fastapi \
   --workdir /opt/fastapi-proxy \
   --user app \
@@ -57,9 +57,10 @@ sandrun --rootfs /mnt/image-volumes/worker \
   --uid 65532 --gid 65532 -- /opt/worker/bin/worker
 ```
 
-当前 AGS 集成将 ext4 系统盘暴露为 `/dev/vda`。`--overlay-device`
-在 sandrun 自己的 Mount Namespace 中挂载该设备，用它承载 OverlayFS 的
-`upperdir` 和 `workdir`；不会把设备挂到 `/mnt`，因此不会遮住 Image Volume。
+`--overlay-device` 必须指向当前业务 sandbox 的 ext4/XFS 系统盘；Go SDK 默认使用
+`/dev/vdb`，也可以通过 `Process.OverlayDevice` 覆盖。sandrun 在自己的 Mount
+Namespace 中挂载该设备，用它承载 OverlayFS 的 `upperdir`、`workdir` 和私有
+DiskMount；不会把设备挂到 `/mnt`，因此不会遮住 Image Volume。
 
 `--overlay-id` 是同一沙箱内稳定且唯一的 Sidecar 身份。sandrun 使用
 `SHA-256(overlay-id + canonical rootfs)` 选择写层目录，并保存完整 Identity

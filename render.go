@@ -11,7 +11,7 @@ import (
 
 const (
 	defaultCampdPath         = "/mnt/sandcamp/bin/campd"
-	defaultOverlayDevicePath = "/dev/vda"
+	defaultOverlayDevicePath = "/dev/vdb"
 	runtimeSpecVersion       = 3
 )
 
@@ -156,10 +156,14 @@ func encodeSpec(spec Spec, images resolvedImageSet) (string, error) {
 }
 
 func toRuntimeSidecar(process Process, image resolvedImage) runtimeSidecar {
+	overlayDevice := process.OverlayDevice
+	if overlayDevice == "" {
+		overlayDevice = defaultOverlayDevicePath
+	}
 	result := runtimeSidecar{
 		runtimeProcess: toRuntimeProcess(process),
 		RootFS:         image.mountPath,
-		OverlayDevice:  defaultOverlayDevicePath,
+		OverlayDevice:  overlayDevice,
 		StandardMounts: true,
 		DiskMounts:     process.DiskMounts,
 		Binds:          toRuntimeBinds(process.Mounts),

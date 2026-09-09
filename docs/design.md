@@ -61,7 +61,7 @@ runtime declaration 是 Go SDK 与 campd 之间的 wire 协议，不是第二套
     "name": "proxy",
     "kind": "service",
     "rootfs": "/mnt/sandcamp-sidecars/proxy",
-    "overlay_device": "/dev/vda",
+    "overlay_device": "/dev/vdb",
     "standard_mounts": true,
     "command": ["/opt/proxy/server"],
     "user": {"name": "app"}
@@ -75,13 +75,17 @@ runtime declaration 是 Go SDK 与 campd 之间的 wire 协议，不是第二套
 }
 ```
 
+Go SDK 默认使用 `/dev/vdb`；`Process.OverlayDevice` 可在业务 sandbox 系统盘位于
+其他设备时覆盖。设备号取决于 Cube 容器系统盘顺序，不应把默认值理解为 Cube 的固定
+全局槽位。
+
 Go SDK 不再把 Sidecar 提前编译成一条 sandrun 命令。campd 根据结构化 Sidecar 字段
 构造：
 
 ```text
 /mnt/sandcamp/bin/sandrun
   --rootfs /mnt/sandcamp-sidecars/proxy
-  --overlay-device /dev/vda
+  --overlay-device /dev/vdb
   --overlay-id proxy
   --standard-mounts
   --workdir /opt/proxy
@@ -180,7 +184,7 @@ Image Volume 提供只读 OCI 文件树，但不会自动应用镜像 Config，�
 
 1. 在切换 Namespace 前校验 rootfs、设备、Bind 与命令；
 2. 创建独立 Mount Namespace，并把挂载传播设为 Private；
-3. 将 `/dev/vda` 的 ext4 文件系统挂到不会遮住 Image Volume 的运行时路径；
+3. 将配置的 Overlay Device（默认 `/dev/vdb`）挂到不会遮住 Image Volume 的运行时路径；
 4. 以 Sidecar Image Volume 为 lowerdir 创建 OverlayFS；
 5. 应用显式 Bind/tmpfs 和标准运行时挂载；
 6. 执行 `pivot_root`，断开旧 RootFS；

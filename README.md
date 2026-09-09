@@ -230,8 +230,9 @@ Image Volume 不会自动应用 OCI `Entrypoint`、`Cmd`、`Env`、`WorkingDir`�
 标准挂载会将沙箱现有的 `/sys/fs/cgroup` 递归映射进每个 Sidecar，保留 cgroup
 原有读写权限，但不授予额外 Capability。Docker Data Root 可通过
 `DiskMounts: []string{"/var/lib/docker"}` 直接使用 Sidecar Overlay Device 上的独立
-ext4/XFS 目录，避免在 Sidecar OverlayFS 上再次使用 `overlay2`；若需要外部持久化或
-共享，再通过 `Process.Mounts` 绑定 AGS/Cube 提供的 StorageMount。
+ext4/XFS 目录，避免在 Sidecar OverlayFS 上再次使用 `overlay2`。Overlay Device 默认
+是 `/dev/vdb`，业务系统盘位于其他设备时可通过 `Process.OverlayDevice` 覆盖；若需要
+外部持久化或共享，再通过 `Process.Mounts` 绑定 AGS/Cube 提供的 StorageMount。
 
 ## 当前边界
 

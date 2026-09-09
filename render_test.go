@@ -219,6 +219,22 @@ func TestRenderStartOmitsPortsWhenNothingIsExposed(t *testing.T) {
 	}
 }
 
+func TestRenderStartEncodesExplicitOverlayDevice(t *testing.T) {
+	spec := referenceSpec()
+	spec.Sidecars[0].OverlayDevice = "/dev/vda"
+	configuration, err := RenderStart(referenceImages(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _ := decodeRuntimeSpec(t, configuration)
+	if got := decoded.Sidecars[0].OverlayDevice; got != "/dev/vda" {
+		t.Fatalf("overlay device = %q, want /dev/vda", got)
+	}
+	if got := decoded.Sidecars[1].OverlayDevice; got != "/dev/vdb" {
+		t.Fatalf("default overlay device = %q, want /dev/vdb", got)
+	}
+}
+
 func TestRenderStartEncodesDiskMountsForSidecar(t *testing.T) {
 	spec := referenceSpec()
 	spec.Sidecars[0].DiskMounts = []string{"/var/lib/docker", "/var/lib/containerd"}
@@ -342,6 +358,20 @@ func TestRenderStartValidation(t *testing.T) {
 			name: "reserved numeric user",
 			edit: func(spec *Spec) {
 				spec.Sidecars[0].User = &ProcessUser{UID: ^uint32(0), GID: 65532}
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "relative sidecar overlay device",
+			edit: func(spec *Spec) {
+				spec.Sidecars[0].OverlayDevice = "dev/vda"
+			},
+			want: ErrInvalidSpec,
+		},
+		{
+			name: "main overlay device",
+			edit: func(spec *Spec) {
+				spec.Main[1].OverlayDevice = "/dev/vda"
 			},
 			want: ErrInvalidSpec,
 		},

@@ -72,7 +72,8 @@ launcher 只能作为容器 PID 1 使用。不要从 Shell 或其他辅助进程
 
 ### `overlay_device_resolve_failed`
 
-`--overlay-device` 路径不存在。AGS 当前使用 `/dev/vda`。
+`--overlay-device` 路径不存在。SDK 默认使用 `/dev/vdb`；如果业务 sandbox 系统盘
+位于其他设备，应通过 `Process.OverlayDevice` 显式覆盖。
 
 ### `overlay device is not a block device`
 
@@ -90,7 +91,8 @@ launcher 只能作为容器 PID 1 使用。不要从 Shell 或其他辅助进程
 ### `overlay_mount_failed: Invalid argument`
 
 通常表示 `upperdir`/`workdir` 位于另一个 OverlayFS 的 merged 层，形成不支持的
-Nested Overlay。不要使用主容器普通目录作为 upper；应使用 `/dev/vda` 的 ext4。
+Nested Overlay。不要使用主容器普通目录作为 upper；应使用业务 sandbox 系统盘的
+ext4/XFS 文件系统。
 
 ### `overlay_workspace_busy`
 
